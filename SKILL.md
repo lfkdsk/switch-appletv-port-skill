@@ -46,7 +46,7 @@ description: Distilled playbook for porting Nintendo Switch games to run nativel
 | 症状 | 先看 |
 |---|---|
 | 黑屏，但有 present | 03 的图形节：CallCommands 未回放、NEAR_IS_MINUS_W、ReportCounter、条件清除、typed view |
-| 启动即崩 / 跑几帧崩 | 03 的装载节：DT_RELR、core=-2、堆大小算错；03 的服务节 |
+| 启动就崩 / 跑几帧崩 | 03 的装载节：DT_RELR、core=-2、堆大小算错；03 的服务节 |
 | 电视上文字不显示，Mac 正常 | 03 的 `texture2d_array` vs 2D（A15 读 0） |
 | 没声音，但音频回调在跑 | 06：回调次数不证明有声，要量 RMS；SDK 20 的 DeviceSink 0x14 |
 | 真机被系统杀掉 | 04：2.05 GiB 上限、按需驻留、纹理包 |

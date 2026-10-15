@@ -89,7 +89,7 @@ A15 不支持 BC 纹理，不替换就只能运行时解成未压缩像素，显
 
 Apple TV 没有现成截屏命令，流程：
 
-1. App 自己把 Metal 最后一帧读回，写 PNG + JSON 到 `Library/Caches`（可用 env 配置截图帧号/间隔/输出尺寸）。
+1. App 自己把 Metal 最新一帧读回，写 PNG + JSON 到 `Library/Caches`（可用 env 配置截图帧号/间隔/输出尺寸）。
 2. `devicectl device copy from` 取回（单文件约 1.4 s，App 不受影响）。
 3. **取回的 PNG 必须自己打开看**，并做语义像素断言（某区域应是某颜色/某形状），不能只比文件哈希。
 
