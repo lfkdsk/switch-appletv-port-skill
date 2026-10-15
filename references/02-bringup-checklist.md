@@ -1,119 +1,119 @@
-# 02 · 从 NSP+keys 到第一帧：检查单
+# 02 · From NSP+keys to first frame: a checklist
 
-每个阶段给「关键动作」和「怎么算完」。数字来自动森项目的实测报告。坑的细节在 03，这里只放检查项。
+Each stage lists the key actions and the done criteria. Numbers come from the ACNH project's measured reports. Pitfall details live in 03; this file is the checklist.
 
-## 阶段总表
+## Stage overview
 
-| # | 阶段 | 关键动作 | 验收 |
+| # | Stage | Key actions | Acceptance |
 |---|---|---|---|
-| 1 | 解包 | hactool 报错就换 LibHac；本体+更新叠合 | 四个 NSO + npdm 齐全 |
-| 2 | 普查 | 导入、服务、NVN API、纹理、指令扫描 | 两套独立工具数字吻合 |
-| 3 | 选型 | 导入层 vs 服务层 HLE；profile vs 开关 | 写下依据 |
-| 4 | 改写+对账 | 跑改写器；loader 补 DT_RELR | 扫描数=改写数；未解析强导入=0 |
-| 5 | 合成客体 | 自己编 NSO 跑通全链路 | 三平台像素断言过 |
-| 6 | 服务 HLE | sm + HIPC 框架 + 各服务 | npdm 每个服务名有会话 |
-| 7 | 音频核心 | 自写 audren 或跑 SDK 渲染器 | 语义测试 + fuzz 绿 |
-| 8 | 着色器 | 全量离线翻译；GS 降级 | 全部出库，失败=0 |
-| 9 | 内存预算 | jetsam 探针实测上限 | 知道上限与工作集差距 |
-| 10 | 纹理包 | BC→ASTC/EAC | 0 失败；视图换格式一起翻 |
-| 11 | 首 present | 装载+服务+NVN 计数桩 | 首次 present 状态 0 |
-| 12 | 第一帧 | 真实 NVN→Metal 回放 | 画面非纯色，像素断言过 |
-| 13 | 可玩 | 压内存、手柄、存档 | 真机连续玩不崩 |
+| 1 | Unpack | If hactool errors, switch to LibHac; overlay base game + update | Four NSOs + npdm all present |
+| 2 | Survey | Imports, services, NVN APIs, textures, instruction scan | Two independent tools agree |
+| 3 | Choose approach | Import-layer vs service-layer HLE; profile vs flags | Rationale written down |
+| 4 | Rewrite + reconcile | Run the rewriter; loader handles DT_RELR | Scan count = rewrite count; unresolved strong imports = 0 |
+| 5 | Synthetic guest | Build your own NSO, run the full pipeline | Pixel assertions pass on all three platforms |
+| 6 | Service HLE | sm + HIPC framework + individual services | Every npdm service name gets a session |
+| 7 | Audio core | Self-written audren or the SDK's in-process renderer | Semantic tests + fuzz green |
+| 8 | Shaders | Full offline translation; GS fallback | All emitted, failures = 0 |
+| 9 | Memory budget | Measure the jetsam limit with a probe | Gap between limit and working set is known |
+| 10 | Texture pack | BC→ASTC/EAC | 0 failures; format-retyped views converted too |
+| 11 | First present | Loading + services + NVN counting stub | First present returns status 0 |
+| 12 | First frame | Real NVN→Metal replay | Frame is non-uniform; pixel assertions pass |
+| 13 | Playable | Memory fit, controllers, save | Plays continuously on device without crashing |
 
-## 1 解包
+## 1 Unpack
 
-- 用 hactool 解 NSP→NCA→ExeFS/RomFS。更新包的 NCA 用了新 BKTR 布局时 hactool 会报 `Invalid BKTR layout!`，换 LibHac（0.19.0）写等价 CLI。
-- 本体 + 更新用 `OpenFileSystemWithPatch` 叠合，取更新后的 ExeFS 和 RomFS。
-- 验收：ExeFS 四个 NSO（rtld/main/subsdk0/sdk）+ main.npdm 齐全。动森实测 RomFS 103,400 个文件、9.8 GB。
-- keys 只以路径传给解包工具，内容不打印、不进日志、不进仓库。
+- Unpack NSP→NCA→ExeFS/RomFS with hactool. Update-package NCAs using the new BKTR layout make hactool fail with `Invalid BKTR layout!` — switch to LibHac (0.19.0) and write an equivalent CLI.
+- Overlay base game + update with `OpenFileSystemWithPatch`; take the updated ExeFS and RomFS.
+- Acceptance: ExeFS has all four NSOs (rtld/main/subsdk0/sdk) + main.npdm. ACNH measured: 103,400 RomFS files, 9.8 GB.
+- Keys are passed to unpacking tools by path only — never printed, logged, or committed.
 
-## 2 普查（survey）
+## 2 Survey
 
-先测量再动手。普查项：
+Measure before building. Survey items:
 
-| 项 | 动森实测 | 为什么要量 |
+| Item | ACNH measured | Why it matters |
 |---|---|---|
-| SDK 导入符号 | 1,015 个、47 个命名空间 | 决定导入层 HLE 的工作量 |
-| NVN API 使用 | 521 个（d2r 底座覆盖 216） | 决定图形层要补多少 |
-| npdm 服务访问 | 51 个 | 服务 HLE 的面 |
-| 纹理普查 | 153,714 张（BC 116,751 / ASTC 36,694） | 决定纹理包工作量与显存账 |
-| 指令扫描 | x18/svc/sysreg 站点数 | 改写对账的基准 |
+| SDK import symbols | 1,015 across 47 namespaces | Sizes the import-layer HLE work |
+| NVN API usage | 521 (d2r base covers 216) | Sizes the graphics-layer work |
+| npdm service access | 51 services | The service-HLE surface |
+| Texture survey | 153,714 instances (BC 116,751 / ASTC 36,694) | Sizes texture-pack work and the VRAM budget |
+| Instruction scan | x18/svc/sysreg site counts | Baseline for rewrite reconciliation |
 
-验收：关键数字用两套独立工具交叉验证（动森的 BNTX 纹理普查两边独立实现，数字一致才算过）。
+Acceptance: cross-check key numbers with two independent tools (ACNH's BNTX texture survey was implemented twice, independently; agreement was the pass criterion).
 
-## 3 选型
+## 3 Choose approach
 
-按 01 的决策表选 HLE 层与多游戏策略，把依据写进设计文档。这一步的产出是一句话：「走哪层、为什么」。
+Pick the HLE layer and multi-game strategy per the decision table in 01, and write the rationale into the design doc. The output of this step is one sentence: which layer, and why.
 
-## 4 改写 + 对账
+## 4 Rewrite + reconcile
 
-- 跑改写器处理全部模块，不支持的指令形态硬报错退出，不要静默跳过。
-- 改写数与普查扫描数逐条对账闭合（动森四模块一次过）。
-- loader 必须支持 DT_RELR：新 SDK 用它打包相对重定位（动森 391,693 个槽），老 loader 只认 RELA，不补就 SIGSEGV。
-- 验收：装载试验里未解析强导入 = 0。
+- Run the rewriter over all modules. Unsupported instruction shapes must hard-fail — never silently skip.
+- Reconcile rewrite counts against the survey scan, line by line (ACNH's four modules passed in one run).
+- The loader must support DT_RELR: new SDKs pack relative relocations with it (ACNH has 391,693 slots). A loader that only knows RELA SIGSEGVs without it.
+- Acceptance: zero unresolved strong imports in a load test.
 
-## 5 合成客体（P0）
+## 5 Synthetic guest (P0)
 
-在碰游戏文件之前，先自己编一个最小 NSO（清屏 + 画一个红三角），跑通：loader → 指令改写 → HLE 导入 → 客体线程 → NVN→Metal 画面。
+Before touching any game file, build a minimal NSO of your own (clear the screen + draw a red triangle) and run the full chain: loader → instruction rewriting → HLE imports → guest thread → NVN→Metal output.
 
-- 验收：macOS、tvOS 模拟器、Apple TV 真机三平台像素断言全过（中心红、四角固定色）。
-- 这一步把底座的坑全部暴露在最小客体上，比在游戏上调试快一个数量级。
+- Acceptance: pixel assertions pass on macOS, the tvOS simulator, and real Apple TV hardware (red center, fixed corner colors).
+- This step exposes every base-layer pitfall on a minimal guest — an order of magnitude faster than debugging on the game.
 
-## 6 服务 HLE
+## 6 Service HLE
 
-- 先搭 HIPC/CMIF/TIPC 编组框架 + sm + handle 表，再逐服务填。
-- npdm 里每个服务名都要能从 sm 拿到会话；未知命令要响应（报错码）而不是静默吞掉——静默会让游戏死等。
-- 联网类服务一律给「离线」语义：返回游戏能接受的无网络结果，不实现真联网。
-- 验收：对照真实请求做 ABI 审计（动森审了 105 条命令，7 个阻断项全修）。
+- Build the HIPC/CMIF/TIPC marshalling framework + sm + handle table first, then fill in services one by one.
+- Every service name in the npdm must return a session from sm. Unknown commands must get a response (an error code), not silence — silence makes the game wait forever.
+- Online services get offline semantics across the board: return a no-network result the game accepts; don't implement real networking.
+- Acceptance: ABI audit against real requests (ACNH audited 105 commands; all 7 blocking issues fixed).
 
-## 7 音频核心
+## 7 Audio core
 
-两条路选一（细节见 06）：自写 audren（按 Ryujinx 固定版本实现），或跑游戏 SDK 自带的进程内渲染器。验收：语义测试 + 长时间 fuzz 绿。
+One of two routes (details in 06): self-written audren (implemented against a pinned Ryujinx revision), or the game SDK's in-process renderer. Acceptance: semantic tests + long fuzz green.
 
-## 8 着色器全量翻译
+## 8 Full shader translation
 
-- 链通了再全量：合成样例 → 全量翻译 → 修翻译器崩溃 → GS 降级。
-- 验收：全部出库。动森两条路线的数字：nx 线 6,141/6,141；smbw 线 9,738/9,742（4 个 GS 失败，走降级）。
-- 翻译产物按链版本归档，宿主只加载匹配版本。
+- Don't run the full set until the chain works: synthetic samples → full translation → fix translator crashes → GS fallback.
+- Acceptance: all shaders emitted. ACNH's two routes: nx line 6,141/6,141; smbw line 9,738/9,742 (4 GS failed, took the fallback).
+- Archive translation outputs by toolchain version; the host loads only matching versions.
 
-## 9 内存预算
+## 9 Memory budget
 
-- 真机 jetsam 探针实测单 App 上限（Apple TV 4K 三代 ≈ 2.05 GiB，无 entitlement 可提）。
-- 对照游戏在 Switch 上的应用内存池（动森 ≈ 3.2 GB），差距就是要压缩的量。
-- 验收：写出预算表——纹理包、内存池、客体堆各占多少，余量多少。
+- Measure the per-app jetsam limit on device with a probe (Apple TV 4K 3rd gen ≈ 2.05 GiB; no entitlement raises it).
+- Compare against the game's Switch application memory pool (ACNH ≈ 3.2 GB). The gap is what you must compress.
+- Acceptance: a written budget — texture pack, memory pools, guest heap each take X, headroom Y.
 
-## 10 纹理包
+## 10 Texture pack
 
-- A15 及更早机型不支持 BC 纹理，离线把 BC 全量转 ASTC/EAC（格式选择见 04）。
-- 视图里重指定过格式的纹理要一起翻；`GetStorageSize` 照旧返回原始 BC 字节数。
-- 验收：0 失败；查表键用纹理内容哈希，离线工具与运行时实现逐字节一致。
+- A15 and earlier have no BC texture decode. Convert all BC textures offline to ASTC/EAC (format choices in 04).
+- Textures whose format was retyped in a view must be converted with their views. `GetStorageSize` keeps returning the original BC byte count.
+- Acceptance: 0 failures. The lookup key is a hash of the texture content; the offline tool and the runtime implementation must agree byte-for-byte.
 
-## 11 首 present
+## 11 First present
 
-NVN 先用「计数 + 安全默认值」桩，目标是装载 + 服务 + 线程模型全部跑通到第一次 `nvnQueuePresentTexture`。
+Run NVN as a "counting + safe defaults" stub first. The goal is getting loading + services + the threading model all the way to the first `nvnQueuePresentTexture`.
 
-- 验收：首次 present 状态 0。动森实测：Mac 宿主 2,604 ms（177 个 NVN API、111 个 IPC 命令有计数）；Apple TV 真机 10,333 ms。
+- Acceptance: first present returns status 0. ACNH measured: Mac host 2,604 ms (177 NVN APIs and 111 IPC commands counted); real Apple TV 10,333 ms.
 
-## 12 第一帧真实画面
+## 12 First real frame
 
-换真实 NVN→Metal 回放后端。这一阶段会撞上 03 里的大部分图形坑，按症状查 03。
+Swap in the real NVN→Metal replay backend. This stage hits most of the graphics pitfalls in 03 — look them up by symptom.
 
-- 验收：画面非纯色。动森 nx 线跑到第 300 帧起出现 5 色 UI，语义像素断言过。
+- Acceptance: the frame is non-uniform. The nx route reached a 5-color UI at frame 300; semantic pixel assertions passed.
 
-## 13 可玩
+## 13 Playable
 
-- 内存压进上限（按需驻留 + 纹理包，见 04/05）。
-- 手柄按位置映射（见 04），存档落 Caches 并处理磁盘满。
-- 存档要验闭环：第一天走完 → 保存并结束 → 重启进标题 → 读档回岛，画面与存档前一致（动森实测读档前后像素平均差 3.02/255，对照画面一有变化就上几十）。设备存档用事务式提交：工作目录克隆整树后原子互换，半截提交会留下痕迹文件可查。
-- 验收：真机连续玩不崩。动森 smbw 线实测连续 1,800 s（按计时自退）。
+- Fit memory under the cap (on-demand residency + texture pack; see 04/05).
+- Controllers map by position (see 04); saves land in Caches and handle disk-full.
+- Verify the save loop end to end: play through day one → save and end → relaunch to the title → load back to the island, image matching the pre-save state (ACNH measured mean per-pixel diff 3.02/255 across the load; any visible change jumps to dozens). Device saves use transactional commit: clone the whole tree in a working directory, then atomically swap — a half-finished commit leaves trace files you can inspect.
+- Acceptance: plays continuously on device without crashing. The smbw route measured 1,800 s continuous (self-exited on a timer).
 
-## 里程碑数字速查
+## Milestone numbers at a glance
 
-| 里程碑 | 机器 | 数字 |
+| Milestone | Machine | Number |
 |---|---|---|
-| 首次 present（NVN 桩） | Mac / Apple TV | 2,604 ms / 10,333 ms |
-| 第一帧（非纯色 UI） | Mac | 第 300 帧 |
-| 首帧（全新安装） | Apple TV | 1,709 ms（优化后，见 05） |
-| 室内对话 | Apple TV | p50 25.5–26.1 ms（≈30 fps 上限） |
-| 岛上户外 | Apple TV | p50 27.8–28.9 ms（30 fps，PERF1 修后；修前 84.4 ms） |
-| 连续运行 | Apple TV | 1,800 s 无崩溃 |
+| First present (NVN stub) | Mac / Apple TV | 2,604 ms / 10,333 ms |
+| First frame (non-uniform UI) | Mac | Frame 300 |
+| First frame (fresh install) | Apple TV | 1,709 ms (optimized; see 05) |
+| Indoor dialogue | Apple TV | p50 25.5–26.1 ms (≈30 fps cap) |
+| Island outdoors | Apple TV | p50 27.8–28.9 ms (30 fps after PERF1; 84.4 ms before) |
+| Continuous run | Apple TV | 1,800 s without a crash |
