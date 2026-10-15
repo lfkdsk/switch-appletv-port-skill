@@ -1,92 +1,92 @@
-# 06 · 音频：audren 两条路与「没声音」的排查
+# 06 · Audio: the two audren routes and debugging "no sound"
 
-## 6.1 audren 两条路，都走通过
+## 6.1 Two audren routes, both proven
 
-游戏的音频走 Horizon 的 AudioRenderer（audren）：游戏每帧生成一段命令缓冲（voice 状态、mix、effect），宿主执行它并把 PCM 喂给 AudioOut。宿主实现有两条路：
+Game audio goes through Horizon's AudioRenderer (audren): every frame the game produces a command buffer (voice state, mixes, effects); the host executes it and feeds PCM to AudioOut. Two host implementations:
 
-| | 自写 audren（nx 路线） | 跑 SDK 自带渲染器（smbw 路线） |
+| | Self-written audren (nx route) | SDK's in-process renderer (smbw route) |
 |---|---|---|
-| 做法 | 按 Ryujinx（MIT，固定 commit）实现命令解析与混音，纯 C11 | 不实现，进程内跑游戏 SDK 自带的渲染器（CPU 渲染 + 手动执行），宿主从命令表找 DeviceSink 取混音缓冲夹成立体声 |
-| 优点 | 行为自己掌控，可 fuzz 验证 | 不用逆向混音语义，SDK 行为保真 |
-| 代价 | 要实现 REV1–15 的线格式与语义 | SDK 20 有两处适配（见 6.4、6.5）；渲染线程竞态要处理 |
-| 验证 | 语义测试 + fuzz 58,362,601 次 update 无崩 | 真机量 RMS（见 6.3） |
+| Approach | Command parsing and mixing implemented against Ryujinx (MIT, pinned commit), pure C11 | Don't implement it — run the game SDK's own renderer in-process (CPU rendering + manual execution); the host finds the DeviceSink in the command table and takes the mix buffer, upmixed to stereo |
+| Strengths | Full control of behavior; fuzz-verifiable | No reverse engineering of mix semantics; SDK-faithful behavior |
+| Costs | Must implement REV1–15 wire formats and semantics | Two SDK 20 adaptations (see 6.4, 6.5); render-thread races to handle |
+| Verification | Semantic tests + fuzz: 58,362,601 updates without a crash | On-device RMS measurement (see 6.3) |
 
-选型参考：第一方游戏用新 SDK、命令格式新（动森用 REV15），自写要补的语义多；第三方游戏 SDK 旧，自写更省事。不管哪条路，下面的坑都适用。
+Selection guidance: first-party games on new SDKs with new command formats (ACNH uses REV15) mean a lot of semantics to reimplement — third-party games on old SDKs are cheaper to self-write. The pitfalls below apply to either route.
 
-## 6.2 自写 audren 的要点
+## 6.2 Self-written audren: the essentials
 
-- 调度：48 kHz、240 帧、5 ms 量子；CLOCK_MONOTONIC absolute deadline pump；渲染帧/量子/event/underrun/overrun 计数。
-- 能力面：PCM16 + GC-DSP ADPCM（predictor/scale/history/loop context，与独立 golden 逐样本 bit-exact）；4 个 wave buffer 环、有限/无限 loop、EOS、pause/resume/flush、starvation 补零；voice→submix DAG→final mix；逐帧 volume ramp；9 种 effect 全解析但按 processing_order 做 dry bypass。
-- REV15 新增：splitter（destination + bias ramp，上限 256/1024）、mix buffer 全局预算 102（动森实际值）、voice SRC/pitch（线性插值，spec 允许）、depop。
-- REV14/15 的 revision 号只是能力位，不改线格式——别被 revision 号吓到，先量实际段大小。
+- Scheduling: 48 kHz, 240 frames, 5 ms quantum; CLOCK_MONOTONIC absolute-deadline pump; counts for rendered frames/quantums/events/underruns/overruns.
+- Capability surface: PCM16 + GC-DSP ADPCM (predictor/scale/history/loop context, bit-exact against an independent golden per sample); 4 wave buffers per voice, finite/infinite loops, EOS, pause/resume/flush, zero-fill on starvation; voice→submix DAG→final mix; per-frame volume ramps; all 9 effect types parsed, dry-bypassed per processing_order.
+- REV15 additions: splitter (destination + bias ramp, caps 256/1024), global mix-buffer budget 102 (ACNH's actual value), voice SRC/pitch (linear interpolation, spec-permitted), depop.
+- REV14/15 revision numbers are capability bits only — they don't change the wire format. Don't be scared by the revision number; measure the actual section sizes first.
 
-## 6.3 「回调在跑 ≠ 有声音」：要量 RMS
+## 6.3 "Callbacks running ≠ there's sound": measure RMS
 
-动森移植在 Apple TV 上踩过的最典型音频坑：声卡约 358,000 次回调、欠载 0、补零 0 ms，看起来一切正常，但日志里「已渲 200 帧，其中有声 0 帧」——每帧的 PCM 在命令校验处被丢弃，送进声卡的全是零。
+The most typical audio pitfall the ACNH port hit on Apple TV: ~358,000 sound-card callbacks, zero underruns, zero zero-fill ms — everything looked fine — but the log said "200 frames rendered, 0 with sound". Every frame's PCM was dropped at command validation; the sound card got silence.
 
-取证方法（修后实测）：
+Forensics (measured after the fix):
 
-| 指标 | 数字 |
+| Metric | Number |
 |---|---|
-| 有声帧（302 s 开场） | 58,586 / 60,000 |
-| RMS | 最小 −44.2 / 中位 −28.9 / 最大 −23.5 dBFS |
-| 频谱平坦度 | 0.002（白噪声约 0.56，乐音远小于 0.1） |
-| 左右相关 | 0.94–0.96 |
-| 240 采样帧边界跳变比 | 约 1.0（拼帧无接缝） |
+| Frames with sound (302 s opening) | 58,586 / 60,000 |
+| RMS | min −44.2 / median −28.9 / max −23.5 dBFS |
+| Spectral flatness | 0.002 (white noise ≈ 0.56; musical tones well under 0.1) |
+| L/R correlation | 0.94–0.96 |
+| 240-sample frame-boundary step ratio | ≈ 1.0 (gapless frame stitching) |
 
-结论：回调次数、欠载计数都不证明有声；要量 PCM 的 RMS，再看频谱形状确认是音乐不是噪声，再人耳听一遍。修前修后用同一套指标对比。
+Conclusion: callback counts and underrun counters prove nothing. Measure PCM RMS, check the spectral shape to confirm music rather than noise, and listen. Compare before/after with the same metrics.
 
-复审（RAUD1）又抓出两条比 bug 本身更通用的：
+The RAUD1 review caught two lessons more general than the bug itself:
 
-- **实时回调里不能打日志。** AudioUnit 的 render callback 里调 `LOG`（`fprintf` 加 stdio 锁）会让实时线程可能阻塞在锁上，日志频率低也不改变这一点。修法：电平统计改双桶原子——回调里只累加平方和/峰值/样本数，普通线程切桶、等旧桶写者退出后再计算再打日志。
-- **RMS 数字要能由仓库脚本复算。** 复审用保留的 PCM 独立复算，发现报告里一个「全程 RMS −17.7 dBFS」和原始 PCM 对不上（实为 −27.028 dBFS）——从日志的 2 s 行拼全程时拼错了一行。修法：分析脚本进仓库（读 s16le 交错 PCM，按 `audioop.rms` 的整数口径换算，不依赖已从新版 Python 移除的 `audioop`），报告给完整命令，复审照命令重跑。
+- **No logging in real-time callbacks.** Calling `LOG` (`fprintf` plus a stdio lock) in AudioUnit's render callback can block the real-time thread on a lock — low log frequency doesn't change that. Fix: double-buffered atomic level stats — the callback only accumulates sum-of-squares/peak/sample count; a normal thread swaps buffers, waits for the old buffer's writers to drain, then computes and logs.
+- **RMS numbers must be reproducible from a repo script.** The review recomputed independently from the retained PCM and found a reported "overall RMS −17.7 dBFS" that didn't match the raw PCM (actually −27.028 dBFS) — a line was mis-stitched when assembling the full-run value from 2 s log rows. Fix: the analysis script lives in the repo (reads s16le interleaved PCM, converts with `audioop.rms`'s integer semantics, without depending on `audioop` which was removed from modern Python); reports give the full command; reviews rerun it.
 
-## 6.4 SDK 20 的 DeviceSink 命令号：0x13 → 0x14
+## 6.4 SDK 20's DeviceSink command number: 0x13 → 0x14
 
-症状：Apple TV 上没声音，声卡回调正常跑、欠载 0（接上一条）。
+Symptom: no sound on Apple TV; sound-card callbacks running fine, zero underruns (see above).
 
-根因：SDK 20 把 DeviceSink 命令号从 0x13 改成 0x14。宿主写死 0x13，取到的是另一条命令（0x13 一帧几十条），字段校验不过就整帧丢弃。保护性校验挡住了越界读，所以只是没声音，没有崩。
+Root cause: SDK 20 changed the DeviceSink command number from 0x13 to 0x14. The host hard-coded 0x13 and read a different command (0x13 appears dozens of times per frame); field validation failed and the whole frame was dropped. The protective validation blocked the out-of-bounds read, so the result was silence, not a crash.
 
-修法：命令号做成游戏档案项（动森档案 0x14，缺省 0x13 不影响旧游戏）。命令表实测 74 条，DeviceSink 是末尾一条（0x148 字节），表头布局与 SDK 16 相同，变的只有命令号。
+Fix: the command number is a game-profile entry (ACNH profile: 0x14; default 0x13 keeps old games working). Measured command table: 74 entries; DeviceSink is the last one (0x148 bytes); the table header layout matches SDK 16; only the command number changed.
 
-另一个排查项：Apple TV 连着蓝牙音频设备时声音只从蓝牙出、电视喇叭不响——「没声音」先查 `AVAudioSession` 的 `currentRoute.outputs`，别只盯宿主。
+One more check: when the Apple TV has a Bluetooth audio device connected, sound goes to Bluetooth only and the TV speakers stay silent — for "no sound", check `AVAudioSession`'s `currentRoute.outputs` first, not just the host.
 
-## 6.5 SDK 20 音频渲染线程竞态
+## 6.5 SDK 20 audio render-thread race
 
-症状：岛上走几分钟必崩在音频渲染线程，栈里带命令头魔数。
+Symptom: minutes of island walking, then a guaranteed crash in the audio render thread, with command-header magic in the stack.
 
-根因：SDK 20 下宿主的追渲（手动执行渲染）调用公开的 `ExecuteAudioRendererRendering`，不经宿主接管层——不持锁、不计渲染次数，与渲染线程并发写同一命令缓冲。
+Root cause: under SDK 20 the host's chase-render (manual render execution) calls the public `ExecuteAudioRendererRendering` without the host interception layer — no lock, no render counting, concurrent writes to the same command buffer as the render thread.
 
-修法：SDK 20 路径渲染线程持锁、计渲染次数、Update 互斥；追渲从每次更新降到全程 3 次。修后连续 2,632 s 无崩溃。
+Fix: on the SDK 20 path the render thread holds the lock, counts renders, and Update is mutually exclusive; chase-render dropped from every update to 3 times total. 2,632 s crash-free after the fix.
 
-## 6.6 REV15 线格式与测试陷阱
+## 6.6 REV15 wire format and the test trap
 
-动森用 REV15，自写路线的真 REV15 线格式与旧版不同：voice 段 0x188（旧版 0x170）、SNDD 0xA8（旧版 0x90），各差 0x18。实现按旧版解，合法 REV15 包被拒绝，游戏走 SetTerminateResult + svcBreak，首帧前崩。
+ACNH uses REV15. The self-written route's real REV15 wire format differs from the old revision: voice sections are 0x188 (old 0x170), SNDD 0xA8 (old 0x90) — 0x18 larger each. Parsing with the old layout rejected legal REV15 packets; the game went through SetTerminateResult + svcBreak and crashed before first frame.
 
-修法：按 update/behavior revision 选 v1/v2 布局；splitter 段从「SNDD」魔数反推 stride；过渡期 host 侧保留带日志的静音 fallback（每 1000 次打一行计数）。
+Fix: select v1/v2 layouts by update/behavior revision; derive the splitter section's stride from the "SNDD" magic; during transition, keep a logged silent fallback on the host side (one count line per 1,000 hits).
 
-测试陷阱（这条比 bug 本身更值钱）：REV15 的测试包内容实际是 REV14 结构，fixture 与生产解析器共享「voice 永远 0x170」的假设，测试自洽通过，fuzz 也变异不出合法 0x188 包。修法：
+The test trap (worth more than the bug itself): the REV15 test fixtures were actually REV14-structured. Fixture and production parser shared the "voice is always 0x170" assumption, so tests passed self-consistently and fuzzing couldn't mutate a legal 0x188 packet. Fix:
 
-- 测试布局表与生产常量物理隔离；
-- 字节级断言尺寸/偏移/stride；
-- 状态字段至少两次 update 测试（跨 update 保留语义）；
-- 反向变异自检：改坏一处生产代码，确认测试变红。
+- Physically separate test layout tables from production constants;
+- Byte-level assertions on size/offset/stride;
+- State fields tested across at least two updates (semantics survive an update);
+- Mutation self-check: break one piece of production code and confirm the test goes red.
 
-## 6.7 影片音频：游戏自己开 AudioOut，宿主只解 PCM
+## 6.7 Movie audio: the game opens AudioOut itself; the host only decodes PCM
 
-动森开场影片是 WebM（VP9 + Vorbis）。关键事实：**游戏不指望系统替它播**——它把音轨当成第二条 MediaCodec 流交给宿主，拿回 PCM16 后自己开一路 `nn::audio::AudioOut` 追加，画面也按宿主回的时间戳对齐。所以宿主要做的不是「播声音」，而是拆封装多报一条音轨、多一个 PCM 解码器。
+ACNH's opening movie is WebM (VP9 + Vorbis). Key fact: **the game doesn't expect the system to play it for it** — it hands the audio track to the host as a second MediaCodec stream, takes the PCM16 back, and opens its own `nn::audio::AudioOut` to append it; video is aligned to the host's timestamps too. So the host's job isn't "play sound" — it's demuxing one extra audio track and one extra PCM decoder.
 
-实现要点：
+Implementation points:
 
-- WebM 两轨按文件顺序交错进一张样本表，如实报每个样本属于哪一轨；游标不能停在没选的轨道上，否则游戏的取帧线程拿到不认识的轨道号会卡住。
-- Vorbis 用 vendored libvorbis（BSD）解成 PCM16，Configure 时从轨道配置取三个设置头。
-- 安全开关：编码不是 A_VORBIS、没有 CodecPrivate、声道数/采样率不对，任一条都退回「只报视频轨」（影片照放、无声）——报了却解不出，游戏会一直等，宁可不报。
-- 影片播放器每帧调 `nn::audio::SetAudioOutVolume`，不接管必崩（宿主的 AudioOut 是不透明句柄，SDK 自己的实现一读就是空指针）；接管后音量乘在送声卡的路上。
+- The two WebM tracks interleave into one sample table in file order; report honestly which track each sample belongs to. The cursor must never rest on a non-selected track, or the game's frame-fetch thread chokes on an unknown track number.
+- Vorbis decodes to PCM16 with vendored libvorbis (BSD); Configure takes the three setup headers from the track config.
+- Safety switch: codec not A_VORBIS, missing CodecPrivate, wrong channel count/sample rate — any of these falls back to "report video only" (movie plays, silent). Reporting a track you can't decode makes the game wait forever; better not to report it.
+- The movie player calls `nn::audio::SetAudioOutVolume` every frame; not taking it over crashes (the host's AudioOut is an opaque handle, and the SDK's own implementation null-derefs on it). After takeover, volume is applied on the way to the sound card.
 
-踩过的坑：解码线程无条件按 VP9 解所有流，音轨 203 包进去、0 帧出来，影片 3 s 后被游戏放弃——按流类型分流到 Vorbis 解码器才好。
+Pitfall hit: the decode thread unconditionally VP9-decoded every stream — the audio track took 203 packets in and produced 0 frames, and the game gave up on the movie after 3 s. Routing by stream type to the Vorbis decoder fixed it.
 
-实测（Mac，整段 65.47 s）：RMS −23.3 dBFS、峰值 −8.6 dBFS、谱平坦度 0.000（是音乐不是噪声）；视频 1959 帧、音频 4564 包，一包不差；影片期间游戏自己停掉 audren 混音（过场声音由影片自带，和原机一样），影片前后照常。tvOS 包能编出来；真机听感未验——真机上唯一 Mac 验不到的点是两路 AudioOut 并存时的欠载与蓝牙路由，留待真机复测。
+Measured (Mac, full 65.47 s): RMS −23.3 dBFS, peak −8.6 dBFS, spectral flatness 0.000 (music, not noise); video 1,959 frames, audio 4,564 packets — not one missing; during the movie the game itself stops the audren mix (cutscene audio comes from the movie, same as on original hardware), and it resumes normally before and after. The tvOS build compiles; on-device listening isn't verified — the one thing Mac can't check is underruns and Bluetooth routing with two AudioOut streams coexisting; left for on-device re-test.
 
 ## 6.8 hwopus
 
-动森导入 8 个 `nn::codec` Hardware 变体（语音聊天用）。两个做法：改写层把构造函数替换成 SDK 自带软件解码器（同虚接口、对象放得下），或宿主 libopus HLE。离线语义阶段保持 UNIMPL 即可。
+ACNH imports 8 `nn::codec` Hardware variants (voice chat). Two options: the rewrite layer replaces the constructor with the SDK's own software decoder (same vtable interface, object fits), or host libopus HLE. During the offline-semantics phase, UNIMPL is fine.
