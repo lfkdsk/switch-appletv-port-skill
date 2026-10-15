@@ -8,7 +8,7 @@
 
 | 截图 | 说明 |
 |---|---|
-| ![tv-nook-text](assets/screens/tv-nook-text.png) | Apple TV 4K（第 3 代）实机：狸克的中文引导文本 |
+| ![tv-nook-text](assets/screens/tv-nook-text.png) | Apple TV 4K（第 3 代）实机：豆狸的中文对话「晚上好！欢迎你的光临！」 |
 | ![tv-island-1](assets/screens/tv-island-1.png) | Apple TV 实机：岛上画面 |
 | ![tv-island-2](assets/screens/tv-island-2.png) | Apple TV 实机：岛上画面（另一处） |
 | ![tv-p0-synthetic](assets/screens/tv-p0-synthetic.png) | 合成测试 NSO 在 Apple TV 上画出的预期画面——loader → 指令改写 → HLE 导入 → 客体线程 → NVN→Metal 全链路的像素级验收 |
@@ -16,7 +16,7 @@
 | ![mac-plaza](assets/screens/mac-plaza.png) | Mac 宿主：广场 |
 | ![mac-nx-first-ui](assets/screens/mac-nx-first-ui.png) | 自研底座路线的第一帧：第 300 帧起出现非纯色 UI |
 
-截图来自我自己合法购买的游戏在我自己设备上的运行画面，仓库里只放这几张缩略图。
+截图是作者自己设备上的运行画面，缩到 320×180 左右，仓库里只放这几张。
 
 ## 安装
 

@@ -83,7 +83,7 @@ A15 不支持 BC 纹理，不替换就只能运行时解成未压缩像素，显
 - **按位置映射**：Apple 的 GCExtendedGamepad 面键属性是固定几何位置，不是键帽字母。映射：`buttonB`→A、`buttonA`→B、`buttonY`→X、`buttonX`→Y、`buttonMenu`→+、`buttonOptions`→−。PS5 ○=A、×=B；Switch Pro 按位置（与标签一致）。
 - **Siri Remote 兜底**：只在没接全键手柄时接入——触控板→左摇杆，按下→A，Menu→B，播放/暂停→+。
 - **震动**：HD Rumble 数值清洗（振幅 [0,1]，低频/高频范围）→ intensity/sharpness，经 Core Haptics 按左右握把分侧。
-- **验收状态**：动森移植的手柄验收在 Apple TV 上用真手柄做过（PS5 DualSense 与 Switch Pro），配对路径：设置 → 遥控器与设备 → 蓝牙。只在模拟器上验过不算数。
+- **验收状态（进行中）**：映射、HD Rumble 与热插拔在 Linux 单测、tvOS 模拟器与真机共享内存自测里过了；真机上只连过 Siri Remote，PS5 DualSense / Switch Pro 实体手柄的全键输入与实际震感**还没验**（配对路径：设置 → 遥控器与设备 → 蓝牙）。只在模拟器上验过不算数。
 
 ## 4.8 真机截图回传
 
@@ -107,4 +107,4 @@ Apple TV 没有现成截屏命令，流程：
 
 ## 4.10 模拟器跑不了图形层
 
-tvOS 模拟器 GPU 无 Metal 4、非统一内存、参数缓冲仅 tier-1，NVN→Metal 层起不来。图形相关验收只能真机；模拟器只适合验装载/服务/逻辑。
+据 d2r-mobile 官方 DmTV 的说明（它专门做了 Metal 4 启动探测界面）：tvOS 模拟器的 GPU 没有 Metal 4、不是统一内存、参数缓冲只到 tier-1，NVN→Metal 层起不来。我们自己的结果全部来自真机，没在模拟器上跑过图形层。图形相关验收只能真机；模拟器只适合验装载/服务/逻辑。
