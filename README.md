@@ -1,8 +1,6 @@
 # Switch → Apple Platform Native Port — a Claude Code Skill
 
-![Hero illustration](assets/hero.jpg)
-
-*Illustration generated with AI — not a real screenshot. Real captures from the Apple TV are below.*
+![Hero](assets/hero.jpg)
 
 A distilled playbook for running Nintendo Switch games natively on Apple Silicon — iPhone, iPad, Mac, and Apple TV — without CPU emulation. It was built from a real port: Animal Crossing: New Horizons (Switch) running and playable on an Apple TV 4K.
 
