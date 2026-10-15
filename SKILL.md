@@ -3,84 +3,84 @@ name: switch-appletv-port
 description: Distilled playbook for porting Nintendo Switch games to run natively on Apple platforms (iPhone/iPad/Mac/Apple TV) without CPU emulation — covering ARM64 instruction rewriting, HLE at the import or IPC layer, NVN→Metal, offline shader translation, and tvOS bring-up, with a symptom-indexed pitfall catalog for black-screen, crash, and no-audio failures; use when starting such a port or debugging one.
 ---
 
-# Switch 游戏原生移植到 Apple 平台
+# Porting Switch Games Natively to Apple Platforms
 
-## 什么时候用
+## When to use this skill
 
-- 把一个 Switch 游戏（NSO/NSP）原生跑在 iPhone、iPad、Mac 或 Apple TV 上
-- 移植中遇到黑屏、崩溃、没声音、内存被杀、文字不显示、帧率上不去
-- 要把 NVN 图形调用接到 Metal，或离线翻译 Maxwell 着色器
-- 想了解 d2r-mobile / nxnative 这类项目的做法并避开它们踩过的坑
+- Running a Switch game (NSO/NSP) natively on iPhone, iPad, Mac, or Apple TV
+- Debugging a port: black screen, crashes, no audio, jetsam kills, missing text, low frame rate
+- Wiring NVN graphics calls to Metal, or translating Maxwell shaders offline
+- Learning how projects like d2r-mobile and nxnative work and avoiding their pitfalls
 
-不适用：整机模拟器（那是另一套技术）；GameCube/Wii 时代游戏（没有同指令集优势，见 references/08 的 bellpad 对照）。
+Not applicable: full-system emulators (a different technology stack); GameCube/Wii-era games (no shared-ISA advantage; see the bellpad comparison in references/08).
 
-## 心智模型
+## Mental model
 
-1. **不模拟 CPU。** Switch 的 CPU 和 Apple Silicon 都是 ARM64，游戏的 NSO 机器码可以原样执行。模拟器的性能代价在这里没有必要；真正要做的是把 Apple 内核下跑不了的少数指令离线改写掉（见 01）。
-2. **改写是离线的、对账的。** 改写器只碰几类指令（x18 影子寄存器、TLS 指针、svc 系统调用、计数器读数、缓存类型寄存器），改完要和反汇编扫描的数字逐条对账闭合。
-3. **系统服务靠宿主 HLE。** 游戏不直接碰内核，它通过 Horizon 的 svc/IPC 拿服务。宿主顶替这些服务有两层做法：在 SDK 导入层顶替，或在 svc/IPC 服务层顶替。两层都有人走通过，选型依据见 01。
-4. **图形是记录-回放，不是即时翻译。** 游戏只经 `nvnBootstrapLoader` 一个符号拿 NVN 函数；宿主把 NVN 命令录下来，在提交时重放成 Metal。着色器全部离线翻译好，运行时按哈希查库。
-5. **tvOS 是另一种生物。** 单 App 内存上限约 2.05 GiB、代码页必须签名、只有 Caches/tmp 可写、A15 不认识 BC 纹理、模拟器跑不了图形层。04 整章讲这个。
-6. **内容边界是硬线。** 仓库里不放游戏代码、资源、keys；工程经验、API 名、服务名可以放。这条线既是合规要求，也决定了哪些证据能进报告。
+1. **No CPU emulation.** The Switch CPU and Apple Silicon are both ARM64, so the game's NSO machine code runs as-is. Emulation's performance cost is unnecessary here. The real work is rewriting the handful of instructions that break under the Apple kernel (see 01).
+2. **Rewriting is offline and reconcilable.** The rewriter touches only a few instruction classes (x18 shadow register, TLS pointers, svc syscalls, counter reads, cache-type registers). Rewrite counts must reconcile exactly against a disassembly scan.
+3. **System services come from host HLE.** Games never touch the kernel directly; they get services through Horizon svc/IPC. The host can substitute at two layers: the SDK import layer, or the svc/IPC service layer. Both have been made to work; see 01 for the decision criteria.
+4. **Graphics is record-and-replay, not just-in-time translation.** Games fetch every NVN function through a single symbol, `nvnBootstrapLoader`. The host records NVN commands into game-managed memory and replays them as Metal at submit time. Shaders are translated fully offline; runtime looks them up by hash.
+5. **tvOS is a different animal.** Per-app memory cap around 2.05 GiB, code pages must be signed, only Caches/tmp are writable, A15 has no BC texture decode, and the simulator cannot run the graphics layer. Chapter 04 covers this.
+6. **The content boundary is a hard line.** No game code, assets, or keys in the repo; engineering experience, API names, and service names are fine. This is both a compliance rule and a constraint on what evidence can appear in reports.
 
-## 工作流：从 NSP 到第一帧
+## Workflow: from NSP to first frame
 
-| 阶段 | 干什么 | 验收 |
+| Stage | What to do | Acceptance |
 |---|---|---|
-| 解包 | NSP→NCA→ExeFS/RomFS；hactool 遇新 BKTR 报错就换 LibHac | 四个 NSO + npdm 齐全 |
-| 普查 | 导入符号、服务访问、NVN API、纹理格式与数量 | 两份独立工具的数字互相吻合 |
-| 选型 | 导入层 HLE 还是服务层 HLE；单游戏还是 game profile | 写下依据，01 有决策表 |
-| 改写+对账 | 跑改写器，和扫描数对账；loader 补 DT_RELR | 未解析强导入 = 0 |
-| 合成客体 | 自己编一个 NSO 跑通全链路 | 三平台像素断言过 |
-| 服务 HLE | sm + HIPC 框架 + 各服务；联网服务给离线语义 | npdm 里每个服务名都有会话 |
-| 着色器 | 全量离线翻译；GS 走 compute 降级 | 全部出库，失败数 = 0 |
-| 纹理包 | BC→ASTC/EAC（A15 必须） | 0 失败，视图换格式一起翻 |
-| 首 present | 装载+服务+NVN 桩先跑通 | 第一次 present 状态 0 |
-| 第一帧 | 真实 NVN→Metal 回放 | 画面非纯色，语义像素断言过 |
-| 可玩 | 内存压进 2.05 GiB、手柄、存档 | 真机连续玩不崩 |
+| Unpack | NSP→NCA→ExeFS/RomFS; if hactool errors on new BKTR layouts, switch to LibHac | Four NSOs + npdm all present |
+| Survey | Import symbols, service access, NVN APIs, texture formats and counts | Numbers from two independent tools agree |
+| Choose approach | Import-layer vs service-layer HLE; single-game vs game profile | Write down the rationale; 01 has the decision table |
+| Rewrite + reconcile | Run the rewriter; loader must handle DT_RELR | Unresolved strong imports = 0 |
+| Synthetic guest | Build your own minimal NSO and run the full pipeline | Pixel assertions pass on all three platforms |
+| Service HLE | sm + HIPC framework + individual services; online services get offline semantics | Every service name in the npdm gets a session |
+| Shaders | Full offline translation; GS via compute fallback | All shaders emitted, failures = 0 |
+| Texture pack | BC→ASTC/EAC (mandatory on A15) | 0 failures; format-retyped views converted too |
+| First present | Loading + services + NVN counting stub first | First present returns status 0 |
+| First frame | Real NVN→Metal replay | Frame is non-uniform; semantic pixel assertions pass |
+| Playable | Fit memory under 2.05 GiB, controllers, save | Plays continuously on device without crashing |
 
-细节与每阶段的坑见 references/02。
+Details and per-stage pitfalls are in references/02.
 
-## 出问题先查哪
+## Symptom lookup
 
-| 症状 | 先看 |
+| Symptom | Read first |
 |---|---|
-| 黑屏，但有 present | 03 的图形节：CallCommands 未回放、NEAR_IS_MINUS_W、ReportCounter、条件清除、typed view |
-| 启动就崩 / 跑几帧崩 | 03 的装载节：DT_RELR、core=-2、堆大小算错；03 的服务节 |
-| 电视上文字不显示，Mac 正常 | 03 的 `texture2d_array` vs 2D（A15 读 0） |
-| 没声音，但音频回调在跑 | 06：回调次数不证明有声，要量 RMS；SDK 20 的 DeviceSink 0x14 |
-| 真机被系统杀掉 | 04：2.05 GiB 上限、按需驻留、纹理包 |
-| 首帧要几分钟 | 05：大概率不是 PSO，是文件系统大小写查找 |
-| 画面冻在黑帧不出图 | 04：CAMetalDisplayLink 在 Apple TV 上不回调 |
-| 帧率低 | 05：先量提交 CPU / GPU / 每 draw 指令数；动森户外的瓶颈是每次绘制线性扫约 3,000 个内存池（13 万→1.1 万指令，p50 84→28 ms） |
-| 游戏两倍速，音乐不跟着快 | 05：出图间隔口径钉成 `game`（30 帧节拍）；逻辑按帧计数，抬帧率就是快放开关 |
-| 近处物体黑网纹（树冠斜纹） | 03：深度预通道 EQUAL 要 `-fpreserve-invariance`，MSL 标了 invariant 但编译没加等于没标 |
-| 保存并结束后中止 | 03：`CalculateStandardUserSystemClockDifferenceByUser` 要接管，SDK 取空 time 服务对象即中止 |
+| Black screen, but presents happen | 03 graphics section: unrecorded CallCommands, NEAR_IS_MINUS_W, ReportCounter, conditional clears, typed views |
+| Crashes at launch or after a few frames | 03 loading section: DT_RELR, core=-2, wrong heap size; 03 services section |
+| Text missing on TV, fine on Mac | 03: `texture2d_array` vs 2D (A15 samples 0) |
+| No audio, but the audio callback is running | 06: callback counts prove nothing; measure RMS; SDK 20 DeviceSink is 0x14 |
+| Killed by the system on device | 04: 2.05 GiB cap, on-demand residency, texture pack |
+| First frame takes minutes | 05: probably not PSO — likely case-insensitive filesystem lookups |
+| Frozen on a black frame, no image | 04: CAMetalDisplayLink never fires on Apple TV |
+| Low frame rate | 05: measure submit CPU / GPU / host instructions per draw first; ACNH outdoor bottleneck was a linear scan of ~3,000 memory pools per draw (130k→11k instructions, p50 84→28 ms) |
+| Game runs at double speed, music doesn't speed up | 05: pin the present interval to `game` (30 fps beat); logic is frame-counted, so uncapping is a fast-forward switch |
+| Black moiré on near objects (tree canopies) | 03: depth-EQUAL prepass needs `-fpreserve-invariance`; MSL `invariant` is ignored without the compiler flag |
+| Abort right after "Save and end" | 03: `CalculateStandardUserSystemClockDifferenceByUser` must be HLE'd; the SDK aborts on a null time service object |
 
-## references 地图
+## references map
 
-| 文件 | 回答的问题 |
+| File | Questions it answers |
 |---|---|
-| 01-route.md | 为什么这样选路线 |
-| 02-bringup-checklist.md | 第一步做什么、每步怎么算完 |
-| 03-first-frame-pitfalls.md | 这个症状别人怎么修好的 |
-| 04-apple-tv.md | tvOS 和 iOS/macOS 有什么不一样 |
-| 05-perf.md | 慢，慢在哪，怎么修 |
-| 06-audio.md | 声音这一摊 |
-| 07-agent-workflow.md | 多个 agent 怎么分工做这种项目 |
-| 08-community.md | 社区谁做过什么、借了什么 |
+| 01-route.md | Why the route is chosen this way |
+| 02-bringup-checklist.md | What to do first, and how each step counts as done |
+| 03-first-frame-pitfalls.md | How someone fixed this exact symptom |
+| 04-apple-tv.md | How tvOS differs from iOS/macOS |
+| 05-perf.md | What's slow, why, and how it was fixed |
+| 06-audio.md | The audio side of the port |
+| 07-agent-workflow.md | How to run this kind of project with multiple agents |
+| 08-community.md | Who in the community did what, and what was borrowed |
 
-## 硬规矩
+## Hard rules
 
-- **不碰游戏内容。** 仓库、报告、日志里不出现游戏代码字节、反汇编、着色器源码、keys。可以写 API 名（`nvn*`、`nn::*`）、服务名、命令号。
-- **数字只写实测的。** 引用数字要能指到具体报告；进行中的标「进行中」；写不准的不写。
-- **真机和模拟器分开记。** 模拟器过了不等于真机过了；宣称真机通过要附命令、退出码、取回的日志/截图路径。
-- **截图要自己看。** 取回的 PNG 必须打开看并做语义像素断言（某区域应是某颜色），不能只比文件哈希。
-- **声音要量电平。** 回调在跑、欠载为 0 都不证明有声；要量 PCM 的 RMS，最好再人耳听。
+- **No game content.** No game code bytes, disassembly, shader source, or keys in the repo, reports, or logs. API names (`nvn*`, `nn::*`), service names, and command numbers are fine.
+- **Only measured numbers.** Any cited number must trace to a specific report; mark in-flight work as such; don't write numbers you can't stand behind.
+- **Device and simulator results are separate.** Simulator pass is not a device pass. A device-pass claim needs the command, exit code, and paths to retrieved logs/screenshots.
+- **Look at every screenshot.** Retrieved PNGs must be opened and checked with semantic pixel assertions (a region should be a specific color), not compared by file hash.
+- **Measure audio levels.** A running callback and zero underruns prove nothing; measure PCM RMS, and ideally listen.
 
-## 给 agent 的操作提示
+## Operational tips for agents
 
-- 读项目报告先看末行 VERDICT（DONE/PARTIAL/PASS/FAIL），再看表格。
-- 移植新游戏时，先跑普查脚本出 survey，再动手写实现；02 有清单。
-- 真机只有一台时，所有设备操作串行做，别并行装包（会互相顶掉，见 04）。
-- 修图形 bug 的套路：先 TEXDUMP 看纹理在不在，再 PASSDUMP 看绘制发没发，再对着色器声明类型查视图类型（03 有完整案例）。
+- Read a project report's final VERDICT line first (DONE/PARTIAL/PASS/FAIL), then the tables.
+- When porting a new game, run the survey scripts before writing implementation code; 02 has the checklist.
+- With one device, do all device operations serially — parallel installs evict each other (see 04).
+- Graphics-bug drill: TEXDUMP first (are textures present?), then PASSDUMP (were draws issued?), then match view types to shader declarations (03 has a full case study).
