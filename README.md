@@ -1,62 +1,88 @@
-# Switch 游戏原生移植到 Apple 平台 · Claude Code skill
+# Switch → Apple Platform Native Port — a Claude Code Skill
 
-把《集合啦！动物森友会》(Switch 版) 原生跑上 Apple TV 4K 的全过程经验，加上社区同类项目的公开做法，蒸馏成一份可复用的 Claude Code skill。
+![Hero illustration](assets/hero.jpg)
 
-「原生」的含义：游戏自带的 ARM64 代码原样在 Apple Silicon 上执行，不做 CPU 模拟；系统服务由宿主 HLE 顶替；图形从 NVN 重写到 Metal；着色器离线翻译。
+*Illustration generated with AI — not a real screenshot. Real captures from the Apple TV are below.*
 
-## 在 Apple TV 上跑起来的动森
+A distilled playbook for running Nintendo Switch games natively on Apple Silicon — iPhone, iPad, Mac, and Apple TV — without CPU emulation. It was built from a real port: Animal Crossing: New Horizons (Switch) running and playable on an Apple TV 4K.
 
-| 截图 | 说明 |
+"Native" means the game's own ARM64 code runs as-is on the Apple CPU; system services are replaced by host HLE; graphics are re-encoded from NVN to Metal; shaders are translated offline.
+
+## Results: ACNH on Apple TV 4K (3rd gen, A15)
+
+| Capture | Scene |
 |---|---|
-| ![tv-nook-text](assets/screens/tv-nook-text.png) | Apple TV 4K（第 3 代）实机：豆狸的中文对话「晚上好！欢迎你的光临！」 |
-| ![tv-island-1](assets/screens/tv-island-1.png) | Apple TV 实机：岛上画面 |
-| ![tv-island-2](assets/screens/tv-island-2.png) | Apple TV 实机：岛上画面（另一处） |
-| ![tv-p0-synthetic](assets/screens/tv-p0-synthetic.png) | 合成测试 NSO 在 Apple TV 上画出的预期画面——loader → 指令改写 → HLE 导入 → 客体线程 → NVN→Metal 全链路的像素级验收 |
-| ![mac-island-dock](assets/screens/mac-island-dock.png) | Mac 宿主原生执行：岛上码头 |
-| ![mac-plaza](assets/screens/mac-plaza.png) | Mac 宿主：广场 |
-| ![mac-nx-first-ui](assets/screens/mac-nx-first-ui.png) | 自研底座路线的第一帧：第 300 帧起出现非纯色 UI |
+| ![tv-release-nook](assets/screens/tv-release-nook.png) | Release build on real hardware: the Nook Inc. counter |
+| ![tv-nook-text](assets/screens/tv-nook-text.png) | Real hardware: Timmy & Tommy's dialogue (game's own Chinese text) |
+| ![tv-island-1](assets/screens/tv-island-1.png) | Real hardware: on the island |
+| ![tv-island-2](assets/screens/tv-island-2.png) | Real hardware: island, another spot |
+| ![mac-title](assets/screens/mac-title.png) | Mac host: title screen after save-and-end |
+| ![mac-nook-welcome](assets/screens/mac-nook-welcome.png) | Mac host: welcome dialogue |
+| ![mac-island-dock](assets/screens/mac-island-dock.png) | Mac host: the dock |
+| ![mac-plaza](assets/screens/mac-plaza.png) | Mac host: the plaza |
+| ![tv-p0-synthetic](assets/screens/tv-p0-synthetic.png) | The synthetic test NSO that validated the whole pipeline (loader → rewriting → HLE → guest thread → NVN→Metal) before any game file was touched |
 
-截图是作者自己设备上的运行画面，缩到 320×180 左右，仓库里只放这几张。
+All captures are from the authors' own devices, downscaled to thumbnails.
 
-## 安装
+Measured on the Apple TV 4K (3rd gen, A15, 4 GB):
 
-把本仓库放到 Claude Code 的 skills 目录：
+| Metric | Value |
+|---|---|
+| First frame, fresh install | 1.6 s |
+| Counter scene | 30 fps beat, frame time p50 33.4 ms |
+| Island outdoors | p50 ~28 ms / p95 ~36 ms — 30 fps |
+| Memory | peak ~1.8 GiB against a 2.05 GiB per-app cap |
+| Audio | yes — in-game audio verified by RMS, not just callback counts |
+| Opening movie | plays with audio (Vorbis track decoded by vendored libvorbis) |
+| Save / title / load | closed loop verified: save and end → title → load back to the island |
+| 60 fps | not feasible: game logic is frame-counted, so uncapping the frame rate makes the whole game run at double speed; and the GPU's best outdoor mode (720p) still lands 12% over the 16.7 ms frame budget |
+
+## What this skill helps with
+
+- **"How do I port a Switch game to iPhone / Mac / Apple TV?"** — the route, the checklist from NSP+keys to first frame, and the decision tables (import-layer vs service-layer HLE, game profiles vs flags).
+- **"My native port has a black screen / crashes / has no sound."** — a symptom-indexed pitfall catalog: every entry was hit and fixed on a real port, with diagnosis and fix.
+- **"How do I wire NVN to Metal?"** — the record-and-replay architecture, object ABI traps, depth conventions, conditional clears, and the shader translation toolchain.
+- **"How do I fit a Switch game into the Apple TV's 2 GB memory limit?"** — the jetsam cap, on-demand pool residency, BC→ASTC texture packs, and where the memory actually goes.
+
+## Install
+
+Clone into your Claude Code skills directory:
 
 ```bash
-git clone <本仓库地址> ~/.claude/skills/switch-appletv-port
+git clone https://github.com/lfkdsk/switch-appletv-port-skill.git ~/.claude/skills/switch-appletv-port
 ```
 
-或放进某个项目的 `.claude/skills/`。之后遇到「把 Switch 游戏移植到 iPhone/Mac/Apple TV」「NVN→Metal」「Switch 原生移植黑屏/没声音」这类请求，Claude Code 会自动加载；也可以用 `/switch-appletv-port` 手动触发。
+Or into a project's `.claude/skills/`. Claude Code then loads the skill automatically for requests like "port this Switch game to Apple TV", "NVN to Metal", or "Switch native port black screen / no sound" — or invoke it manually with `/switch-appletv-port`.
 
-## 内容地图
+## Content map
 
-| 文件 | 内容 |
+| File | Contents |
 |---|---|
-| `SKILL.md` | 入口：心智模型、工作流、症状分诊、硬规矩 |
-| `references/01-route.md` | 路线选型：为什么不模拟 CPU、改写哪些指令、HLE 做在哪层、NVN→Metal、离线 shader |
-| `references/02-bringup-checklist.md` | 从 NSP+keys 到第一帧的检查单 |
-| `references/03-first-frame-pitfalls.md` | 黑屏/崩溃根因目录（症状 → 定位 → 修法） |
-| `references/04-apple-tv.md` | tvOS 专题：内存上限、W^X、看门狗、可写目录、纹理包、手柄、截图回传 |
-| `references/05-perf.md` | 首帧 236 s→1.7 s、预热与离线管线、TBDR、户外帧率 |
-| `references/06-audio.md` | audren 两条路、REV15、SDK 20 静音兼容包、RMS 取证 |
-| `references/07-agent-workflow.md` | 多 agent 推进方式：规格驱动、跨模型族复审、双路线竞速 |
-| `references/08-community.md` | 社区项目做法：d2r-mobile、nxnative、nx-port、bellpad |
+| `SKILL.md` | Entry point: mental model, workflow, symptom triage, hard rules |
+| `references/01-route.md` | Route selection: why no CPU emulation, which instructions get rewritten, where HLE lives, NVN→Metal, offline shaders |
+| `references/02-bringup-checklist.md` | The checklist from NSP+keys to first frame |
+| `references/03-first-frame-pitfalls.md` | Root-cause catalog for black screens and crashes (symptom → diagnosis → fix) |
+| `references/04-apple-tv.md` | tvOS deep dive: memory cap, W^X, watchdog, writable directories, texture packs, controllers, screenshot retrieval |
+| `references/05-perf.md` | First frame 236 s → 1.7 s, prewarm and offline pipelines, TBDR, outdoor frame rate |
+| `references/06-audio.md` | The two audren routes, REV15, the SDK 20 silent-compatibility packet, RMS forensics |
+| `references/07-agent-workflow.md` | Multi-agent workflow: spec-driven, cross-family review, two-route race |
+| `references/08-community.md` | Community projects: d2r-mobile, nxnative, nx-port, bellpad |
 
-## 免责声明
+## Disclaimer
 
-- 本仓库**不含任何游戏代码、资源、keys**：没有反汇编、没有着色器源码、没有游戏文件内容，只有工程经验、API 名与服务名。
-- 照本 skill 移植游戏，需要你自己**合法拥有**游戏本体，并从**你自己的主机**导出 keys。
-- 任天堂、《集合啦！动物森友会》及相关商标归任天堂所有；本项目与任天堂无任何隶属关系。
-- 本仓库内容以 MIT 许可发布，见 [LICENSE](LICENSE)。
+- This repo **contains no game code, assets, or keys**: no disassembly, no shader source, no game file contents — only engineering experience, API names, and service names.
+- Porting a game with this skill requires that you **legally own** the game and export keys from **your own console**.
+- Nintendo, Animal Crossing: New Horizons, and related trademarks belong to Nintendo. This project is not affiliated with Nintendo in any way.
+- Released under the MIT license — see [LICENSE](LICENSE).
 
-## 致谢
+## Acknowledgments
 
-本 skill 的经验来自两条自研路线与四个社区项目，全部感谢原作者：
+The experience in this skill comes from two in-house routes and four community projects. Thanks to all the original authors:
 
-| 项目 | 作者 | 许可 | 借鉴内容 |
+| Project | Author | License | Borrowed |
 |---|---|---|---|
-| [d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) | jhaizhou-ops | MIT | 整条原生执行路线、NVN→Metal 记录/回放、内存按需驻留、官方 tvOS 目标 |
-| [nxnative](https://github.com/seedds/smbw-mobile)（原 smbw-mobile） | seedds | MIT | game profile、RomFS 目录索引、present interval 档案化、docs/agents 故障目录 |
-| [nx-port](https://github.com/Johnoooob/nx-port) | Johnoooob | MIT | 运行时着色器记录、.nro 动态模块、差异行为开关化 |
-| [bellpad](https://github.com/chrissotraidis/bellpad) | chrissotraidis 及 ac-decomp 社区 | CC0/MIT 混合 | decomp 路线对照、60 Hz 帧节奏契约、合规栈 |
-| Ryujinx | Ryujinx 团队 | MIT | 着色器翻译器与 audren 实现的固定版本参考 |
+| [d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) | jhaizhou-ops | MIT | The entire native-execution route, NVN→Metal record/replay, on-demand residency, official tvOS target |
+| [nxnative](https://github.com/seedds/smbw-mobile) (formerly smbw-mobile) | seedds | MIT | Game profiles, RomFS per-directory indexing, present-interval profiling, docs/agents failure catalog |
+| [nx-port](https://github.com/Johnoooob/nx-port) | Johnoooob | MIT | Runtime shader recording, .nro dynamic modules, divergent behavior behind flags |
+| [bellpad](https://github.com/chrissotraidis/bellpad) | chrissotraidis and the ac-decomp community | CC0/MIT mixed | Decomp-route comparison, 60 Hz pacing contract, compliance stack |
+| Ryujinx | The Ryujinx team | MIT | Pinned-revision reference for the shader translator and audren implementation |
