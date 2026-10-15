@@ -1,94 +1,94 @@
-# 08 · 社区项目：别人怎么做的，我们借了什么
+# 08 · Community projects: how others did it, what we borrowed
 
-四个公开项目，都是「把主机游戏原生跑在 Apple 平台」或同类工程。动森项目的两条路线都建立在它们的经验上，这里写清各自做法与借鉴点，方便后来者按图索骥。许可全部为 MIT 或更宽松，引用时保留原作者版权声明。
+Four public projects, all in the "console games running natively on Apple platforms" space or adjacent engineering. The ACNH project's two routes both build on their experience. This file documents each project's approach and the borrowed pieces, so newcomers can follow the trail. All licenses are MIT or more permissive; keep the original copyright notices when citing.
 
-## 8.1 d2r-mobile（jhaizhou-ops）
+## 8.1 d2r-mobile (jhaizhou-ops)
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 是什么 | 《暗黑破坏神 2：重制版》Switch 版在 iPhone/iPad/Mac/Apple TV 上的原生兼容层；44 台真机封闭 beta 通关三个难度，iPhone 17 Pro Max 实测 60 fps |
-| 路线 | 不模拟 CPU + 离线改写少数指令 + host 顶替 Horizon + NVN 记录/回放到 Metal + 着色器全离线翻译（Ryujinx 翻译器 → SPIR-V → spirv-cross → MSL） |
-| 内容边界 | 仓库不含任何游戏程序/美术/文本/着色器，全部在用户机器上从自有游戏文件生成；导出前有工具按字节扫描全树，命中就阻断 |
-| tvOS | 官方有社区移植的 DmTV 目标（独立 Xcode target，共用 host 与图形层）；Apple TV 4K 三代实机到达职业选择画面；模拟器跑不了图形层，只能实机 |
-| 许可 | MIT |
+| What it is | Native compatibility layer running Diablo II: Resurrected (Switch) on iPhone/iPad/Mac/Apple TV; a 44-device closed beta cleared all three difficulties; 60 fps measured on iPhone 17 Pro Max |
+| Route | No CPU emulation + offline rewriting of a few instructions + host substituting Horizon + NVN record/replay to Metal + fully offline shader translation (Ryujinx translator → SPIR-V → spirv-cross → MSL) |
+| Content boundary | The repo contains no game code/art/text/shaders — everything is generated on the user's machine from their own game files; a tool byte-scans the whole tree before export and blocks on any hit |
+| tvOS | Official community-ported DmTV target (separate Xcode target, shared host and graphics layer); reached the class-selection screen on Apple TV 4K 3rd gen hardware; the simulator can't run the graphics layer — hardware only |
+| License | MIT |
 
-借鉴点：
+Borrowed:
 
-- **整条原生执行路线**就是动森项目的模板：不模拟 CPU、改写少数指令、host 顶替、NVN 记录/回放、着色器离线翻译。
-- **内存按需驻留**（e2a0c9a）：图形内存池只在首次 GPU 使用时才加入驻留集，省约 0.5 GB 有线内存——4 GB 机型的关键优化。
-- **sRGB 呈现修复**（#36）：渲染目标经改格式的视图写入，sRGB 交换链通过非 sRGB 视图采样呈现，否则画面偏暗。
-- **翻译线程化**（v1.0.15）：命令翻译挪到独立线程，与游戏逻辑重叠一帧。
-- **翻译链版本化**：链上源码+工具指纹哈希，宿主只加载匹配版本的库。
-- **「移植到别的游戏」清单**：README 明列了 host 里为单一游戏写死的默认行为（渲染缩放、存档种子、固定分辨率等），换游戏前必须先关掉或挪进 per-game 配置。
-- **内容合规框架**：「仓库里有什么、为什么必须有」的清单 + 导出前字节扫描。
+- **The entire native-execution route** is the ACNH project's template: no CPU emulation, rewrite a few instructions, host substitution, NVN record/replay, offline shader translation.
+- **On-demand memory residency** (e2a0c9a): graphics pools enter the residency set only on first GPU use, saving ~0.5 GB of wired memory — the key optimization for 4 GB devices.
+- **sRGB presentation fix** (#36): render targets are written through format-retyped views, and the sRGB swapchain is sampled for presentation through a non-sRGB view; otherwise the image is too dark.
+- **Translation threading** (v1.0.15): command translation moved to a dedicated thread, overlapping game logic by one frame.
+- **Toolchain versioning**: hash the chain's source + tool fingerprints; the host loads only matching-version libraries.
+- **"Porting to other games" checklist**: the README enumerates host defaults hard-coded for a single game (render scale, save seed, fixed resolution, etc.) — these must be turned off or moved into per-game config before porting.
+- **Content-compliance framework**: a manifest of "what's in the repo and why it must be" + pre-export byte scanning.
 
-## 8.2 nxnative（seedds，原 smbw-mobile）
+## 8.2 nxnative (seedds, formerly smbw-mobile)
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 是什么 | 多游戏 Switch 原生移植工具链：一个脚本把 NSP + prod.keys 打成未签名 IPA 侧载；已支持《超级马力欧兄弟 惊奇》（iPhone 上 60 fps 可玩）和《火焰纹章 Engage》（bring-up 中） |
-| 与 d2r-mobile 的关系 | 始于 d2r-mobile 通用部分的复制，修复双向流动 |
-| 许可 | MIT（继承自 d2r-mobile） |
+| What it is | Multi-game Switch native-port toolchain: one script packages NSP + prod.keys into an unsigned IPA for sideloading; supports Super Mario Bros. Wonder (playable at 60 fps on iPhone) and Fire Emblem Engage (in bring-up) |
+| Relation to d2r-mobile | Started as a copy of d2r-mobile's generic parts; fixes flow both ways |
+| License | MIT (inherited from d2r-mobile) |
 
-借鉴点：
+Borrowed:
 
-- **game profile 架构**：每游戏一个目录（标题号、build、模块、RomFS 标记、NVN 常量表、着色器表），工具没有 profile 就停。改写剪口与固定地址行为全部按 NSO build ID 键控，绝不让固定地址跑在没验证过的 build 上。动森更新频繁，这套机制正好对口。
-- **普查先行**：无 profile 时脚本自动出调查报告（模块/build ID/SDK 版本/引擎标记/容器/改写点/导入对比），「先测量再动手」。
-- **RomFS 每目录名字索引**：只读挂载在首次查找时建「客体名→物理名」索引。起因是 Engage 单目录 38,000 文件，大小写映射的逐条目 getxattr 让启动黑屏 17 s；加索引后 1.8 s。动森 RomFS 10 万+ 文件，同一问题。
-- **present interval 档案化**：`game`（按游戏设的间隔出帧，同 Switch）vs `display`（每个显示节拍一帧）。动森锁 30 fps 且逻辑按帧走，属 `game` 档。
-- **DLC 打包**：DLC NSP 按序号挂载，host 按序号报告已拥有。
-- **docs/agents 故障目录**：01–05 五份文档（提取、普查、bring-up、图形、调试），其中 bring-up 的失败目录（改写器、内存、线程、服务、NVN 对象尺寸、GPU 挂死、音频）是全项目最有价值的故障索引，本 skill 的 03 大量受惠。
-- **着色器键的改进**：控制段+代码一起哈希（马力欧有 6,367 对共享控制段但代码不同）；容器普查扫全部 RomFS 文件而不只是主着色器包。
-- **预热清单回流**：边玩边记现场编译的 shader/管线，下次启动后台预热。
+- **Game profile architecture**: one directory per game (title ID, builds, modules, RomFS markers, NVN constant tables, shader tables); tools stop without a profile. Rewrite cut points and fixed-address behavior are all keyed by NSO build ID — never let a fixed address run against an unverified build. ACNH updates frequently; this mechanism fits exactly.
+- **Survey first**: without a profile, the script auto-produces a survey report (modules/build IDs/SDK version/engine markers/containers/rewrite sites/import comparison) — measure before building.
+- **RomFS per-directory name index**: the read-only mount builds a "guest name → physical name" index on first lookup. Caused by Engage's single 38,000-file directory, where per-entry getxattr for case mapping made the launch black-screen for 17 s; 1.8 s after indexing. ACNH RomFS has 100k+ files — same problem.
+- **Present interval as a profile entry**: `game` (present at the game's own interval, same as Switch) vs `display` (one frame per display beat). ACNH locks 30 fps and its logic is frame-driven — the `game` profile.
+- **DLC packaging**: DLC NSPs mounted by index; the host reports ownership by index.
+- **docs/agents failure catalog**: five documents (extraction, survey, bring-up, graphics, debugging); the bring-up failure catalog (rewriter, memory, threads, services, NVN object sizes, GPU hangs, audio) is the most valuable failure index in the whole project — this skill's 03 owes it heavily.
+- **Shader key improvements**: hash control section + code together (Mario has 6,367 pairs sharing a control section with different code); the container survey scans all RomFS files, not just the main shader package.
+- **Prewarm manifest feedback**: record live-compiled shaders/pipelines while playing; prewarm in the background at next launch.
 
-## 8.3 nx-port（Johnoooob）
+## 8.3 nx-port (Johnoooob)
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 是什么 | d2r-mobile 的第二个游戏泛化 fork：删掉围绕单一游戏的部分，验证同一套原生执行路线能走多远；已 bring up 一个 NVN 游戏 |
-| 许可 | MIT |
+| What it is | The second game-generalization fork of d2r-mobile: strips the single-game-specific parts to test how far the same native-execution route goes; one NVN game brought up |
+| License | MIT |
 
-借鉴点：
+Borrowed:
 
-- **运行时着色器记录**：离线表的替代方案——边跑边记录游戏用到的着色器，事后再翻译。首跑画面是坏的，但能最快见到第一帧；正式版再回离线表。bring-up 早期值得考虑。
-- **.nro 动态模块**：host 实现 `nn::ro`（含 RELR 重定位与 TLS 描述符），目标游戏带动态模块时是现成参考。
-- **差异行为开关化**：第二个游戏的图形行为全放 env 开关后默认全开，与 nxnative 的 profile 路线相反——快速试验期更轻。
-- **几何着色器→顶点变体**：Metal 无 geometry stage，点精灵扩四边形的 VS 变体写法。
+- **Runtime shader recording**: the alternative to the offline table — record shaders the game uses while running, translate afterward. The first run looks broken but reaches first frame fastest; return to the offline table for the real build. Worth considering in early bring-up.
+- **.nro dynamic modules**: the host implements `nn::ro` (including RELR relocations and TLS descriptors) — a ready reference when the target game ships dynamic modules.
+- **Divergent behavior behind flags**: the second game's graphics behavior all sits behind env flags, on by default — the opposite of nxnative's profile route; lighter during fast experimentation.
+- **Geometry shader → vertex variant**: Metal has no geometry stage; a VS-variant approach for point-sprite-to-quad expansion.
 
-## 8.4 bellpad（chrissotraidis 及 ac-decomp 社区）
+## 8.4 bellpad (chrissotraidis and the ac-decomp community)
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 是什么 | GameCube 初代《动物森友会》的**源码级**原生移植：基于 ac-decomp 反编译成果，游戏核心编成 64 位原生代码，经 Aurora（源码级 SDK 兼容层）+ SDL3 + Dawn/WebGPU 跑在 macOS 与 iPhone/iPad 上 |
-| 许可 | 混合许可（游戏代码 CC0，兼容层 MIT） |
+| What it is | A **source-level** native port of the GameCube original Animal Crossing: based on ac-decomp's decompilation, the game core compiles to native 64-bit code and runs on macOS and iPhone/iPad via Aurora (source-level SDK compatibility layer) + SDL3 + Dawn/WebGPU |
+| License | Mixed (game code CC0, compatibility layer MIT) |
 
-与本 skill 路线的差别：
+How it differs from this skill's route:
 
-| 维度 | bellpad（decomp 重建） | 本 skill（二进制原生执行） |
+| Dimension | bellpad (decomp rebuild) | This skill (binary native execution) |
 |---|---|---|
-| 前提 | 需有高质量反编译源码 | 只需游戏文件 + 逆向出接口事实 |
-| 运行形态 | 游戏源码编成原生 64 位程序 | 原版 aarch64 二进制直接跑，仅改写少数指令 |
-| 平台绑定 | 架构无关 | 绑 aarch64（Switch 与 Apple 同指令集是前提） |
-| 前期成本 | 极高（反编译整款游戏） | 中（接口普查 + 逐游戏 bring-up） |
+| Prerequisite | High-quality decompiled source | Game files + reverse-engineered interface facts |
+| Runtime form | Game source compiled to a native 64-bit program | The original aarch64 binary runs directly, with a few instructions rewritten |
+| Platform binding | Architecture-agnostic | Bound to aarch64 (the shared Switch/Apple ISA is the prerequisite) |
+| Up-front cost | Extreme (decompiling a whole game) | Medium (interface survey + per-game bring-up) |
 
-借鉴点：
+Borrowed:
 
-- **路线对照**：同 IP 两种工程路线的活样本——GC 代靠 decomp，Switch 代只能靠原生执行（Switch 游戏没有公开反编译项目）。论证「为什么我们这样选」时用得上。
-- **60 Hz 帧节奏契约**：游戏模拟由固定回扫驱动，即使 ProMotion 也必须请求 60 Hz——120 Hz 会让游戏速度翻倍。「模拟 tick 数绝不随呈现帧率改变」对锁 30 fps 的动森是同一条铁律。
-- **游戏数据校验**：钉死 Redump 哈希 + 头部/尺寸/流式指纹多重校验 + 原子安装 + 坏档隔离，是「用户自备数据」的最严实现。
-- **只发配方不发 app**：release 只发构建配方，用户自建，规避发布含游戏代码 app 的风险。
-- **合规栈**：洁净室约定 + 全部上游钉版本 + 第三方声明清单，适合需要对外发布的项目。
+- **Route comparison**: a living sample of two engineering routes for the same IP — the GC generation relies on decomp; the Switch generation can only rely on native execution (no public decompilation projects exist for Switch games). Useful when arguing for "why we chose this".
+- **60 Hz frame-pacing contract**: game simulation is driven by a fixed retrace; even on ProMotion it must request 60 Hz — 120 Hz doubles game speed. "Simulation tick count never changes with present rate" is the same iron rule for 30 fps-locked ACNH.
+- **Game data verification**: pinned Redump hashes + header/size/streaming fingerprints + atomic install + bad-save isolation — the strictest implementation of "user-supplied data".
+- **Ship recipes, not apps**: releases publish build recipes; users build themselves, avoiding the risk of shipping an app containing game code.
+- **Compliance stack**: clean-room conventions + all upstreams pinned + third-party notice lists — suited to projects that need to publish externally.
 
-## 8.5 速查
+## 8.5 Quick reference
 
 | | d2r-mobile | nxnative | nx-port | bellpad |
 |---|---|---|---|---|
-| 路线 | 二进制原生执行 | 二进制原生执行 | 二进制原生执行 | decomp 源码重建 |
-| 多游戏机制 | 单游戏 + 移植清单 | game profile + build ID 键控 | env 开关 | 单游戏 |
-| 着色器 | 全离线，控制段哈希键 | 全离线，控制段+代码哈希键 | 运行时记录+事后翻译 | 源码层 GX→WebGPU |
-| tvOS | 有（DmTV 社区预览） | 无 | 无 | 无 |
-| 对动森移植的相关度 | 直接（路线+tvOS 模板） | 直接（profile/普查/故障目录） | 间接（替代策略） | 间接（路线对照+合规） |
+| Route | Binary native execution | Binary native execution | Binary native execution | Decomp source rebuild |
+| Multi-game mechanism | Single game + porting checklist | Game profile + build ID keying | env flags | Single game |
+| Shaders | Fully offline, control-section hash key | Fully offline, control-section+code hash key | Runtime recording + post-translation | Source-level GX→WebGPU |
+| tvOS | Yes (DmTV community preview) | No | No | No |
+| Relevance to the ACNH port | Direct (route + tvOS template) | Direct (profile/survey/failure catalog) | Indirect (alternative strategies) | Indirect (route comparison + compliance) |
 
-## 8.6 致谢
+## 8.6 Acknowledgments
 
-动森 on Apple TV 的两条路线直接 fork/借鉴了 d2r-mobile 与 nxnative 的代码与文档（均 MIT），着色器翻译与 audren 实现参考 Ryujinx（MIT，固定 commit），GC 代对照参考 bellpad 与 ac-decomp 社区（CC0/MIT）。感谢所有原作者的开源工作。引用这些项目时保留各自版权声明与许可。
+The two ACNH-on-Apple-TV routes directly fork/borrow code and docs from d2r-mobile and nxnative (both MIT); the shader translator and audren implementation reference Ryujinx (MIT, pinned commit); the GC-generation comparison references bellpad and the ac-decomp community (CC0/MIT). Thanks to all the original authors for their open-source work. Keep each project's copyright notice and license when citing them.
