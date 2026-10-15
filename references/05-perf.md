@@ -1,120 +1,120 @@
-# 05 · 性能：慢在哪，怎么修
+# 05 · Performance: what's slow and how it was fixed
 
-## 5.1 首帧 236 s → 1.7 s：不是 PSO 的锅
+## 5.1 First frame 236 s → 1.7 s: not PSO's fault
 
-| 项 | 数字 |
+| Item | Number |
 |---|---|
-| 修前首帧（Apple TV，全新安装） | 236,672 ms |
-| 修后首帧 | 1,709 ms；第二次启动 1,392 ms |
-| Mac 对照 | 68,204 ms → 1,155 ms |
+| First frame before the fix (Apple TV, fresh install) | 236,672 ms |
+| After | 1,709 ms; second launch 1,392 ms |
+| Mac comparison | 68,204 ms → 1,155 ms |
 
-定位过程：先量 PSO 编译耗时——首帧之前 Metal 只编 1~2 条管线 + 2 个着色器库（Mac 47.7 ms，占 0.07%；Apple TV 8.5 ms，占 0.2%），排除。采样 60 s 栈顶折叠，两个装载线程几乎全程在 `getxattr`（5,620 次）。
+Diagnosis: measure PSO compile time first — before first frame, Metal compiled only 1–2 pipelines + 2 shader libraries (Mac 47.7 ms, 0.07%; Apple TV 8.5 ms, 0.2%). Ruled out. A 60 s folded stack sample showed both loading threads spending almost all their time in `getxattr` (5,620 calls).
 
-根因：Horizon 路径区分大小写、APFS 不区分。宿主做大小写精确查找时，「原样名不存在」就列目录逐项问 `getxattr`（约 40 µs/项），游戏开场大量「文件存在吗」探测把同一个上万项目录反复全扫。
+Root cause: Horizon paths are case-sensitive; APFS isn't. The host's case-exact lookup, on "name doesn't exist as-is", lists the directory and asks `getxattr` per entry (~40 µs/entry). The game's opening probes for file existence, repeatedly full-scanning the same ten-thousand-entry directories.
 
-修法两层：
+Two-layer fix:
 
-1. 目录无别名缓存：扫完发现没有「物理名≠客体名」就记干净，省掉 109 次全扫（−232.6 s）。
-2. 只对别名项问 xattr：6 次扫描 60,195 项从 2,455.6 ms 降到 44.7 ms（−2.35 s）。
+1. No-alias directory cache: a scan that finds no "physical name ≠ guest name" entries records the directory as clean, cutting 109 full scans (−232.6 s).
+2. Ask xattr only for alias entries: 6 scans of 60,195 entries dropped from 2,455.6 ms to 44.7 ms (−2.35 s).
 
-两层合计占全部收益的 99.3%。
+Together the two layers account for 99.3% of the total win.
 
-教训：首帧慢先做栈采样，别假设是 PSO——手机游戏的 PSO 故事听多了会形成思维定式。
+Lesson: when first frame is slow, take a stack sample first — don't assume PSO. Hearing too many mobile-game PSO stories builds a mental rut.
 
-## 5.2 预热清单 vs 离线管线归档
+## 5.2 Prewarm manifest vs offline pipeline archives
 
-| 方案 | 省什么 | 数字 | 状态 |
+| Approach | Saves what | Numbers | Status |
 |---|---|---|---|
-| 预热清单 | 首帧**之后**的开场卡顿，不是首帧 | 清单 1,733 行（651 着色器 / 1,075 渲染管线 / 7 计算管线，行序=首次使用顺序）；Mac 上岛三分钟同步管线创建 147 → 3 次（−98%），同步载入 metallib 59 → 0；冷缓存全量预热 2.7 s（后台执行，first-present 只多 20 ms），热缓存 84 ms | 已落地 |
-| 离线 AOT 归档 | 冷缓存的预热编译本身 | tvOS 26 SDK 的 `metal-tt` 能在 Mac 上为 A15 产 binary archive，最小样例跑通；缺 pso_skey→mtlp-json 生成器（工作量估一天） | 可行未落地 |
+| Prewarm manifest | Post-first-frame opening stutter, not first frame | Manifest 1,733 lines (651 shaders / 1,075 render pipelines / 7 compute pipelines; line order = first-use order); on Mac, 3 minutes on the island: synchronous pipeline creation 147 → 3 (−98%), synchronous metallib loads 59 → 0; cold-cache full prewarm 2.7 s (background; first-present costs only +20 ms), warm cache 84 ms | Shipped |
+| Offline AOT archive | The cold-cache prewarm compile itself | tvOS 26 SDK's `metal-tt` can produce binary archives for A15 on Mac; minimal sample works; missing a pso_skey→mtlp-json generator (est. 1 day of work) | Feasible, not shipped |
 
-两个注意：
+Two caveats:
 
-- 预热清单对首帧没用——首帧只用 2 条管线，开不开清单一样（1,392/1,412 ms）。
-- 设备收割的归档只能用在同 GPU 且同 OS build 的机器，不匹配 Metal 静默回落运行时编译。
-- 清单在 Mac 上录、tvOS 通用：动森的清单按首次出现顺序合并多局录制去重，旧 980 行逐行保留在最前，岛上内容排在开场之后后台预热。A15 真机上旧清单口径实测预热 1,428 项用时 473.8 ms；完整 1,733 项的真机耗时未测。
+- The prewarm manifest does nothing for first frame — first frame uses 2 pipelines either way (1,392/1,412 ms with/without).
+- Device-harvested archives only work on machines with the same GPU and OS build; on mismatch Metal silently falls back to runtime compilation.
+- The manifest is recorded on Mac and applies to tvOS: ACNH's manifest merges multiple play sessions by first-appearance order with dedup; the old 980 lines are kept first in order, and island content is prewarmed in the background after the opening. On A15 hardware, the old manifest's 1,428 entries prewarmed in 473.8 ms; the full 1,733-entry on-device time wasn't measured.
 
-清单还有第二种玩法（nxnative）：边玩边记现场编译的 shader/管线到 `pso_user.tsv`，下次启动后台预热，清单按内容键命名、跨设备通用。
+The manifest has a second use (nxnative): record live-compiled shaders/pipelines while playing into `pso_user.tsv`, prewarm in the background at next launch; manifests are named by content key and portable across devices.
 
-## 5.3 帧率与瓶颈定位
+## 5.3 Frame rate and bottleneck location
 
-| 场景 | 机器 | 数字 |
+| Scene | Machine | Numbers |
 |---|---|---|
-| 室内对话 | Apple TV | p50 25.5–26.1 ms / p95 30.3–31.2 ms（游戏出图间隔 2 = 30 fps 上限） |
-| 开场影片 | Apple TV | p50 16.7 ms |
-| 岛上户外走动（修前） | Apple TV | p50 84.4 ms / p95 93.2 ms（约 11–12 fps） |
-| 岛上户外走动（修后，PERF1） | Apple TV | p50 27.8–28.9 ms / p95 35–38 ms（30 fps） |
-| 岛上码头（修前） | Mac M5 Pro | p50 33.32 ms（30 fps 上限），每帧约 2,442 次绘制，提交 CPU 18.9 ms |
-| 广场（修前） | Mac M5 Pro | p50 40.4 ms（约 25 fps），每帧 5,433 次绘制，提交 CPU 33.1 ms |
+| Indoor dialogue | Apple TV | p50 25.5–26.1 ms / p95 30.3–31.2 ms (game present interval 2 = 30 fps cap) |
+| Opening movie | Apple TV | p50 16.7 ms |
+| Island outdoors, walking (before) | Apple TV | p50 84.4 ms / p95 93.2 ms (~11–12 fps) |
+| Island outdoors (after PERF1) | Apple TV | p50 27.8–28.9 ms / p95 35–38 ms (30 fps) |
+| Island dock (before) | Mac M5 Pro | p50 33.32 ms (30 fps cap), ~2,442 draws/frame, submit CPU 18.9 ms |
+| Plaza (before) | Mac M5 Pro | p50 40.4 ms (~25 fps), 5,433 draws/frame, submit CPU 33.1 ms |
 
-户外瓶颈（Apple TV，PERF1 定位并修复）：每帧约 3,300–4,300 次绘制，修前每次绘制约 13 万条宿主指令，九成花在取址上——回放层每次把客体地址换成 Metal 缓冲都从头线性扫描全部内存池（动森岛上约 3,000 个池，一次绘制取址 13–17 次）；脏页跟踪的区间查找同样线性扫约 3,000 个区间。GPU p50 只有 26 ms，**瓶颈在 CPU 提交，不在 GPU**。
+The outdoor bottleneck (Apple TV, found and fixed by PERF1): ~3,300–4,300 draws per frame; before the fix each draw cost ~130k host instructions, 90% of it address translation — the replay layer linearly scanned all memory pools from scratch on every guest→Metal buffer translation (~3,000 pools on the ACNH island; 13–17 translations per draw). The dirty-page tracker's range lookup did the same linear scan over ~3,000 ranges. GPU p50 was only 26 ms — **the bottleneck was CPU submit, not the GPU**.
 
-修法（都在回放层，游戏无感）：
+Fixes (all in the replay layer, invisible to the game):
 
-- 池表按起点有序存，取址二分；二分前挡一张 4096 项直接映射表（按 64 KiB 块记池下标，命中再比边界）。池互不重叠是游戏既有事实；一旦登记到重叠的池就报红并退回线性扫描，结果与原来一致。
-- 脏页区间查找加本线程小表（512 项），区间表每次登记/注销按代号作废旧记录，命中给的就是此刻线性扫描会给的那个区间。
-- 上传暂存块按槽跨批复用，不再每批新建一块 32 MB——岛上流式贴图每帧重传，旧法每帧一次 32 MB 分配加驻留集登记/撤出。
+- Pools stored sorted by start; binary search for translation. A 4,096-entry direct-map table in front (pool index per 64 KiB block; boundaries checked on hit). Pools don't overlap — an existing game invariant; a registered overlapping pool reports red and falls back to linear scan, with identical results.
+- Dirty-page range lookup gets a per-thread small table (512 entries); the range table invalidates stale records by generation on register/unregister; hits return exactly what a linear scan would return now.
+- Upload staging blocks reused across batches by slot, instead of a fresh 32 MB allocation per batch — island streaming textures re-upload every frame, and the old path paid a 32 MB allocation plus residency register/unregister per frame.
 
-修后实测：keting 户外每次绘制 13 万 → 约 1.1 万条指令，每帧提交 CPU 57–61 → 6.5–7.2 ms，帧时间 p50 84 → 28 ms，footprint 峰值 1,824 MiB；Mac 岛上提交 CPU 19.6 → 2.8 ms。
+Measured after: on keting, instructions per outdoor draw 130k → ~11k; per-frame submit CPU 57–61 → 6.5–7.2 ms; frame time p50 84 → 28 ms; footprint peak 1,824 MiB. Mac island submit CPU 19.6 → 2.8 ms.
 
-两个试过但在真机上没有收益、档案缺省保持关的方向：
+Two directions tried with no on-device gain, left off by default in the profile:
 
-- **翻译工作线程**（照 d2r-mobile v1.0.15 实现：游戏线程只入队、独立线程回放）：Mac 不限帧率省约 6%，keting 上开/关 A/B 无收益——提交降到 7 ms 后提交线程已不在关键路径（GPU p95 约 26–27 ms，游戏逻辑在别的线程上）。
-- **TBDR 写回前瞻**（见 5.4）：keting 上 GPU 时间没有下降。
+- **Translation worker thread** (per d2r-mobile v1.0.15: game threads only enqueue, a dedicated thread replays): ~6% on Mac with uncapped frame rate; no A/B gain on keting — once submit is down to 7 ms the submit thread is off the critical path (GPU p95 ~26–27 ms; game logic runs on other threads).
+- **TBDR write-back speculation** (see 5.4): no GPU time reduction on keting.
 
-一个误读的纠正：先前怀疑「翻译线程 QoS 为 0（没吃到性能核）」，实测那条线程带实时策略（优先级 97），实时策略下本来就不设 QoS，不是没设优先级。提交降下来后它不在关键路径，QoS 实验没有再做。
+A correction: an earlier suspicion that "the translation thread has QoS 0 (not on performance cores)" was wrong — the thread runs a real-time policy (priority 97), and real-time policies don't set QoS by design. Once submit got off the critical path, the QoS experiment was dropped.
 
-教训：帧率低先量三样——**提交 CPU 时间、GPU 时间、每次绘制的宿主指令数**——再动手。这次如果先假设是 GPU 或 PSO，就会南辕北辙。
+Lesson: when frame rate is low, measure three things first — **submit CPU time, GPU time, host instructions per draw** — then act. Assuming GPU or PSO here would have sent the work in exactly the wrong direction.
 
-## 5.4 TBDR 与无绑定
+## 5.4 TBDR and bindless
 
-背景：nxnative 的 TBDR（写回前瞻）优化默认关着，理由是「不认无绑定（bindless）句柄」。动森的无绑定占比是 **0 / 9,738**，这个理由对动森不成立，于是做了一轮。
+Background: nxnative's TBDR (write-back speculation) optimization is off by default, citing "doesn't recognize bindless handles". ACNH's bindless share is **0 / 9,738**, so that reason doesn't apply here — hence this round of work.
 
-正确性坑（比性能重要）：TBDR 一开 3D 背景整张黑。根因是写回前瞻把**条件渲染下的清除**当成「后面整张会被盖掉」的证据，而那次清除按 GPU 计数器实际没执行——写回省了，清除也没发生。修法：录制期渲染开关不确定或已知关着时，不把清除记进写回前瞻索引。
+Correctness pitfall (more important than performance): with TBDR on, the whole 3D background went black. Write-back speculation treated **clears under conditional rendering** as evidence that "the whole thing gets overwritten later" — but that clear never actually executed per the GPU counters. The write-back was saved; so was the clear. Fix: when the render-enable state is uncertain or known-off at record time, don't index the clear for write-back speculation.
 
-性能：
+Performance:
 
-| 机器 | 数字 |
+| Machine | Numbers |
 |---|---|
-| Mac M5 Pro | 同场景 GPU p50 降约 20%、p95 降约 25% |
-| Apple TV | PERF1 K2 复测（TBDR 开 vs 关各 30+ 窗口）：GPU p50 21.8 vs 19.9–21.2 ms，没有下降，档案缺省仍关 |
+| Mac M5 Pro | Same scene: GPU p50 down ~20%, p95 down ~25% |
+| Apple TV | PERF1 K2 re-test (TBDR on vs off, 30+ windows each): GPU p50 21.8 vs 19.9–21.2 ms — no reduction; profile default stays off |
 
-无绑定适配：统一推断本次绘制读哪些贴图，无绑定句柄从录下的 UB 解析，解不出就放弃这一通道优化；热路径零开销。
+Bindless adaptation: infer which textures a draw reads, uniformly; resolve bindless handles from recorded UBs; give up this pass's optimization when unresolved. Zero hot-path overhead.
 
-另一个观察：动森室内一帧 65 个渲染通道（13 个 1920×1080、23 个 960×540），全屏通道偏多，通道合并是后续可做的方向。
+Another observation: ACNH indoors runs 65 render passes per frame (13 at 1920×1080, 23 at 960×540) — a lot of full-screen passes; pass merging is future work.
 
-## 5.5 着色器翻译数量
+## 5.5 Shader translation counts
 
-| 线 | 数字 |
+| Route | Numbers |
 |---|---|
-| nx 线 | 23,739 个变体去重为 6,141 个唯一 Maxwell 代码（VS 3,117 / PS 2,991 / CS 29 / GS 4），全部出库；全量墙钟 75.3 s（10 worker） |
-| smbw 线 | 着色器表 6,536 → 9,742（补短控制段 3,206 个），编译通过 9,738（4 个 GS 失败走降级）；tvOS 重编 14,020 个 metallib，失败 0 |
+| nx line | 23,739 variants dedup to 6,141 unique Maxwell programs (VS 3,117 / PS 2,991 / CS 29 / GS 4), all emitted; full-run wall time 75.3 s (10 workers) |
+| smbw line | Shader table 6,536 → 9,742 (3,206 short-control-section entries added); 9,738 compile (4 GS failed, took the fallback); tvOS rebuilt 14,020 metallibs, 0 failures |
 
-短控制段是表对不上的常见原因：agl/gsys 包控制段只有 0x848/0x854 字节，按固定 0x880 取哈希会把装载期改写的指针也算进去，每次键都不同（见 03）。
+Short control sections are the usual reason tables don't line up: agl/gsys package control sections are only 0x848/0x854 bytes, and hashing a fixed 0x880 includes load-time-rewritten pointers, so every key differs (see 03).
 
-## 5.6 内存性能
+## 5.6 Memory performance
 
-- 按需驻留：池创建时不进驻留集，首次 GPU 取址才驻留并当场提交。上游实测省约 0.5 GB 有线内存（同一机制对动森约省 550 MB / 25%）。
-- 纹理包：同一驻留工作集 43.96 GiB → 7.31 GiB；包走 pread 不占内存（见 04）。
-- 线程退出释放：修过 TLS/TLR/线程对象退出不释放的泄漏（600 块×9.5 KB）。
+- On-demand residency: pools stay out of the residency set until the first GPU address fetch, then commit. ~0.5 GB wired memory saved upstream (~550 MB / 25% for ACNH with the same mechanism).
+- Texture pack: same resident working set 43.96 GiB → 7.31 GiB; the pack is pread-backed and costs no memory (see 04).
+- Thread-exit release: fixed a leak where TLS/TLR/thread objects weren't freed on exit (600 blocks × 9.5 KB).
 
-## 5.7 60 帧与游戏速度：先修快放，再谈提速
+## 5.7 60 fps and game speed: fix fast-forward first, then talk speedups
 
-动森户外 60 帧的实验结论（keting 实测）：**现在不能，两条路都不成立**。
+The 60 fps outdoor experiment on keting concluded: **not possible right now — neither route holds**.
 
-**游戏侧：解开出图间隔 = 整个游戏两倍速。** 动森的逻辑按帧计数——打字机对话、HID 轮询、时间换算都随帧推进，只有音频按墙钟（每秒约 199 次更新，两跑一致）。Mac 上同一份按键脚本对拍：解开间隔后 180 s 出帧 5,100 → 10,500，按一次 A 后 0.35 s 打出的字数 5 → 13，音乐不加速。要正常速度得照社区 SpeedFix 的规模改：约 760–7,381 处代码补丁 + `StaticParam.pack` 约 1,300 个值（45 帧版用 1.5 倍、120 帧版用 4 倍），等于把按帧计数的逻辑改成按时间步进。
+**Game side: uncapping the present interval means the whole game runs at double speed.** ACNH's logic is frame-counted — typewriter dialogue, HID polling, and time conversion all advance per frame; only audio runs on wall clock (~199 updates/second, identical across runs). A replay of the same input script on Mac: uncapped, 180 s produced 5,100 → 10,500 frames; after one A press, characters typed in 0.35 s went 5 → 13; music didn't speed up. Normal speed would need changes on the scale of the community SpeedFix: ~760–7,381 code patches + ~1,300 `StaticParam.pack` values (1.5× for the 45 fps version, 4× for 120 fps) — converting frame-counted logic to time-stepped.
 
-**GPU 侧：户外最好的一档仍超预算。** 门槛 GPU p95 ≤ 15 ms、提交 CPU ≤ 6 ms。keting 户外实测：
+**GPU side: even the best outdoor mode exceeds the budget.** The bar is GPU p95 ≤ 15 ms and submit CPU ≤ 6 ms. keting outdoor measurements:
 
-| 组合 | GPU p95 | 提交 CPU |
+| Combo | GPU p95 | Submit CPU |
 |---|---|---|
-| 1080p TBDR 关 | 26.62 ms | 7.37 ms |
-| 1080p TBDR 开 | 26.33 ms | 8.47 ms |
-| 720p TBDR 关 | 19.21 ms | 7.58 ms |
-| 720p TBDR 开（最好一档） | 18.65 ms | 8.12 ms |
+| 1080p TBDR off | 26.62 ms | 7.37 ms |
+| 1080p TBDR on | 26.33 ms | 8.47 ms |
+| 720p TBDR off | 19.21 ms | 7.58 ms |
+| 720p TBDR on (best mode) | 18.65 ms | 8.12 ms |
 
-最好一档比 60 帧整帧预算 16.7 ms 还高 12%。瓶颈是**绘制次数**不是像素：1080p→720p 像素少 55.6%，GPU 只省 25%；TBDR 省掉约 10% 的写回带宽，帧时间 0% 收益——A15 的带宽不是这一帧的瓶颈。户外每帧 3,500–4,200 次绘制，柜台只有约 100 次，所以轻场景在真机上确实能跑 60（柜台 720p 实测 p50 16.81 ms = 59.5 帧，GPU p95 14.2 ms），但不能外推到户外。继续追 60 帧的性价比顺序：独立回放线程（已有实现）→ 减绘制次数（合批/剔除）→ 游戏侧 SpeedFix。900p 做不到：游戏没有「按比例缩 3D 目标」的对外口子，宿主也没有通用缩放。
+The best mode is still 12% over the 16.7 ms full-frame budget for 60 fps. The bottleneck is **draw count, not pixels**: 1080p→720p cuts pixels 55.6% but GPU time only 25%; TBDR saves ~10% of write-back bandwidth for 0% frame-time gain — A15's bandwidth isn't this frame's bottleneck. Outdoor scenes run 3,500–4,200 draws per frame; the counter scene only ~100, so light scenes do hit 60 on device (counter at 720p measured p50 16.81 ms = 59.5 fps, GPU p95 14.2 ms) — but that doesn't extrapolate outdoors. The cost-effective order for chasing 60: dedicated replay thread (already implemented) → cut draw count (batching/culling) → game-side SpeedFix. 900p isn't reachable: the game has no external hook for "scale the 3D target proportionally", and the host has no generic scaler.
 
-**比 60 帧更要紧的是修掉真机快放。** 出图间隔口径原来隐式跟「有没有窗口」走：Mac 无窗口按游戏设的间隔（30 帧节拍），真机有窗口按显示节拍每拍出一帧——于是游戏按「实际帧率 / 30」倍速跑（PERF1 的 23 ms 帧约 1.4 倍速，更早的 84 ms 帧约 0.4 倍速），音乐按墙钟不跟着变。修法：出图间隔做成档案项，动森钉成 `game`（30 帧节拍）。解开间隔的开关只当诊断工具——它不是帧率开关，是快放开关，别当「实验性 60 帧」给用户。
+**Fixing on-device fast-forward matters more than 60 fps.** The present-interval mode implicitly followed "is there a window": Mac with no window used the game's own interval (30 fps beat); device with a window presented one frame per display beat — so the game ran at "actual fps / 30" speed (PERF1's 23 ms frames ≈ 1.4×; the earlier 84 ms frames ≈ 0.4×), while music stayed on wall clock. Fix: the present interval is a profile entry, pinned to `game` (30 fps beat) for ACNH. The uncap switch is a diagnostic tool only — it's not a frame-rate switch, it's a fast-forward switch; don't ship it to users as "experimental 60 fps".
 
-社区资料对照：模拟器/Atmosphere 的 60 帧补丁说的是同一件事（单抬帧上限 = 两倍速，SpeedFix 配套）；「实机 1080p 只有约 45 帧、强制 720p 才稳 60」与这里的分辨率结论一致。
+Community cross-check: emulator/Atmosphere 60 fps patches say the same thing (uncapping alone = double speed; SpeedFix required); "real hardware 1080p only manages ~45 fps, force 720p for stable 60" matches the resolution findings here.
