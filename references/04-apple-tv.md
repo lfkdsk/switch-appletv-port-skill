@@ -1,122 +1,122 @@
-# 04 · tvOS 专题：和 iOS/macOS 不一样的地方
+# 04 · tvOS deep dive: where it differs from iOS/macOS
 
-Apple TV 是这套移植里约束最紧的目标。每条都给实测数字。
+Apple TV is the tightest target in this port. Every claim carries a measured number.
 
-## 4.1 内存上限：2.05 GiB 硬顶
+## 4.1 Memory limit: a hard 2.05 GiB cap
 
-| 项 | 数字 | 说明 |
+| Item | Number | Notes |
 |---|---|---|
-| 单 App jetsam 上限 | ≈ 2.05 GiB | 无 entitlement 时；两次 touch 运行都在累计分配 2,048 MB 后下一步被杀，可复现 |
-| entitlement | 提不了 | IML（提物理上限）不支持 tvOS；EVA 只扩虚拟地址空间，不动物理上限 |
-| 运行时查询 | `os_proc_available_memory()` | tvOS 27 可信：启动报 2.041 GiB，被杀前一步报 37.8 MiB |
-| 虚拟地址（无 EVA） | 单块 mmap 上限 6 GB，累计 7 GB | 7.3 GiB 纹理包不能整包 mmap，改只读索引 + pread |
-| Switch 侧对照 | 动森应用内存池 ≈ 3.2 GB | 差距约 1 GB，必须靠压缩/流式化压进 2 GB |
+| Per-app jetsam limit | ≈ 2.05 GiB | Without entitlements; two touch runs were both killed on the next step after 2,048 MB cumulative allocation — reproducible |
+| Entitlements | Can't raise it | IML (raising the physical limit) isn't supported on tvOS; EVA only extends virtual address space, not the physical limit |
+| Runtime query | `os_proc_available_memory()` | Trustworthy on tvOS 27: reports 2.041 GiB at launch, 37.8 MiB one step before the kill |
+| Virtual address (no EVA) | 6 GB per mmap, 7 GB cumulative | The 7.3 GiB texture pack can't be mmaped whole — read-only index + pread instead |
+| Switch side comparison | ACNH application memory pool ≈ 3.2 GB | A ~1 GB gap that must be compressed/streamed into 2 GB |
 
-实测占用（Apple TV 4K 三代，A15）：
+Measured usage (Apple TV 4K 3rd gen, A15):
 
-| 场景 | 峰值 | 备注 |
+| Scene | Peak | Notes |
 |---|---|---|
-| 首 present（NVN 计数桩，无真实显存） | 710 MiB | 下界，不能推最终可行性 |
-| 室内（BC 运行时解码路径） | 1,377–1,494 MiB | first-present 后增量几乎全是 Metal |
-| 30 分钟实玩（纹理包启用） | 1,744 MiB | 上岛后平稳无增长，最少剩 353 MiB |
+| First present (NVN counting stub, no real VRAM) | 710 MiB | A lower bound; doesn't predict final feasibility |
+| Indoors (BC runtime decode path) | 1,377–1,494 MiB | Almost all post-first-present growth is Metal |
+| 30-minute play session (texture pack enabled) | 1,744 MiB | Flat after reaching the island, no growth; minimum headroom 353 MiB |
 
-内存优化的两个大头：内存池按需驻留（省约 0.5 GB，见 03）和 BC→ASTC/EAC 纹理包（同一驻留工作集 43.96 GiB → 7.31 GiB，见 4.5）。
+The two big memory wins: on-demand pool residency (~0.5 GB saved, see 03) and the BC→ASTC/EAC texture pack (same resident working set 43.96 GiB → 7.31 GiB, see 4.5).
 
-## 4.2 W^X 与签名代码页
+## 4.2 W^X and signed code pages
 
-tvOS 不能把匿名数据页改成可执行页。两条路线的做法：
+tvOS won't let you turn anonymous data pages into executable pages. The two routes:
 
-- 改写后的四个 NSO 模块打进签名 Guest.framework（Mach-O section + vm_remap 映射已签名 RX 页）。
-- 或把改写模块嵌进可执行文件的 `__TEXT`，运行时 vm_remap 共享已签名页（这条路线不需要 Guest.framework）。
+- Put the four rewritten NSO modules into a signed Guest.framework (Mach-O section + vm_remap of signed RX pages).
+- Or embed the rewritten modules in the executable's `__TEXT` and vm_remap the signed pages at runtime (this route needs no Guest.framework).
 
-ctr_el0 的改写必须在签名前离线完成，tvOS 上不能运行时改这条指令。
+The ctr_el0 rewrite must happen offline, before signing — it can't be done at runtime on tvOS.
 
-## 4.3 看门狗与可写目录
+## 4.3 Watchdog and writable directories
 
-- **scene 看门狗**：主线程堵约 20 s 就被 0x8BADF00D 杀。`didFinishLaunching` 里只做立即返回，解包与客体宿主全放后台队列（修后解包 80 s 存活）。
-- **只有 Caches/tmp 可写**：App 容器的 Documents 不可写（实测写 `/var/mobile/containers/...` 报错）。输出一律写 `Library/Caches`（NSCachesDirectory）或 tmp。
-- **Caches 会被系统清**：Caches 属系统可清理缓存。App 启动做 preflight，关键数据缺失时明确报错，别假设还在。
-- **env 覆盖顺序**：`Caches/env.txt` 先读、同名键先到先得，会整体盖掉包内 env。多人共用一台设备时，别人留在 Caches 的 env.txt 能让你的按键脚本/截图配置全部失效——排查「配置没生效」先查这个。
+- **Scene watchdog**: blocking the main thread for ~20 s gets you killed with 0x8BADF00D. `didFinishLaunching` returns immediately; unpacking and the guest host run entirely on background queues (survived 80 s of unpacking after the fix).
+- **Only Caches/tmp are writable**: the app container's Documents is not writable (writing `/var/mobile/containers/...` fails in practice). Write everything to `Library/Caches` (NSCachesDirectory) or tmp.
+- **Caches gets purged**: Caches is system-purgeable. The app runs a preflight at launch and fails loudly when critical data is missing — never assume it's still there.
+- **env override order**: `Caches/env.txt` is read first; same-named keys, first one wins, and it overrides the bundled env wholesale. When multiple people share a device, someone else's env.txt left in Caches can silently disable your input scripts and screenshot configs — check this first when "config didn't apply".
 
-## 4.4 RomFS 放哪
+## 4.4 Where RomFS lives
 
-动森 RomFS：103,400 个文件、9.78 GiB。三个方案：
+ACNH RomFS: 103,400 files, 9.78 GiB. Three options:
 
-| 方案 | 结论 | 数字 |
+| Option | Verdict | Numbers |
 |---|---|---|
-| `Library/Caches/romfs` | 开发期采用 | 21 片×≤500 MiB + 就绪标记；推送 461–616 s；设备侧展开 78.7–80.3 s；staging 核对文件数/字节数后原子发布 |
-| App bundle 内 | 可安装、可读、不被 Caches 清理；代价是包体与安装时间 | bundle 10.7 GB；构建 79 s；安装 593 s |
-| 局域网 HTTP | 未实现 | 前两个都通，不需要 |
+| `Library/Caches/romfs` | Used during development | 21 chunks × ≤500 MiB + readiness marker; push 461–616 s; on-device expand 78.7–80.3 s; staging verifies file/byte counts, then publishes atomically |
+| Inside the app bundle | Installable, readable, not purged by Caches; costs bundle size and install time | 10.7 GB bundle; build 79 s; install 593 s |
+| LAN HTTP | Not implemented | The first two work, so it wasn't needed |
 
-直接逐文件 copy 不可行：CoreDevice 小文件事务慢，relay 断线还留残文件。
+Plain per-file copy is not viable: CoreDevice's small-file transactions are slow, and relay disconnects leave junk behind.
 
-## 4.5 A15 无 BC 纹理解码 → ASTC/EAC 包
+## 4.5 A15 has no BC texture decode → the ASTC/EAC pack
 
-A15 不支持 BC 纹理，不替换就只能运行时解成未压缩像素，显存直接爆。
+A15 doesn't support BC textures. Without replacement, the only option is runtime decode to uncompressed pixels, which blows the VRAM budget.
 
-| 项 | 数字 |
+| Item | Number |
 |---|---|
-| 源规模 | 116,751 张 BC 实例；内容去重后 81,741 张、11.41 GiB |
-| 产物 | balanced 包 7.315 GiB，81,741 条，0 失败；编码 376 s（15 并行） |
-| 键 | 原纹理内容哈希（NVN 层看不到 BNTX/路径，只看得到池里字节）；离线工具与运行时实现逐字节一致 |
-| 显存收益 | 同一驻留工作集：运行时解 BC 43.96 GiB → 包 7.31 GiB（6.0 倍），比原始 BC 还省 1.56 倍 |
+| Source scale | 116,751 BC instances; 81,741 unique after content dedup, 11.41 GiB |
+| Output | balanced pack 7.315 GiB, 81,741 entries, 0 failures; encode 376 s (15 parallel) |
+| Key | Original texture content hash (the NVN layer can't see BNTX/paths, only pool bytes); offline tool and runtime agree byte-for-byte |
+| VRAM win | Same resident working set: runtime BC decode 43.96 GiB → pack 7.31 GiB (6.0×), 1.56× smaller than the original BC |
 
-格式策略：
+Format strategy:
 
-| 源格式 | 目标 | 原因 |
+| Source | Target | Why |
 |---|---|---|
 | BC1 | ASTC 8x8 | PSNR p50 42.52 dB |
 | BC3/BC7 | ASTC 5x5 | PSNR p50 44.40 dB |
-| BC5_SNORM（法线图，占 BC 字节 41%） | EAC_RG11Snorm | ASTC LDR 无有符号模式，转 ASTC 会把 [-1,1] 压成 [0,1]；EAC 块字节相同、语义精确、不改着色器 |
+| BC5_SNORM (normal maps, 41% of BC bytes) | EAC_RG11Snorm | ASTC LDR has no signed mode; ASTC would crush [-1,1] to [0,1]. EAC matches block bytes, keeps exact semantics, needs no shader changes |
 | BC4 | EAC_R11 | PSNR p50 52.79 dB |
 
-两个易漏点：视图里重指定过格式的纹理要按底图格式建视图（见 03）；整包 mmap 放不下，改只读索引 + pread。
+Two easy-to-miss points: textures with format retyped in a view must get views built on the underlying format (see 03); the pack can't be mmaped whole — read-only index + pread.
 
-## 4.6 CAMetalDisplayLink 不回调
+## 4.6 CAMetalDisplayLink never fires
 
-症状：框架缺省第 3 帧把出图切到 CAMetalDisplayLink，Apple TV 上回调从不来，游戏在兜底时钟空跑，实际出图停在第 3 次，画面冻在黑帧。
+Symptom: the framework's default switches output to CAMetalDisplayLink at frame 3. On Apple TV the callbacks never arrive; the game idles on the fallback clock, output stops at the 3rd present, and the image freezes on a black frame.
 
-修法：tvOS 缺省让出图线程自取 drawable（env 可改回）。这类「Apple TV 上特有、模拟器和 Mac 都正常」的坑只能真机发现。
+Fix: on tvOS, the output thread self-fetches drawables by default (env switch to revert). This class of bug — "Apple TV only, simulator and Mac both fine" — can only be found on real hardware.
 
-## 4.7 手柄
+## 4.7 Controllers
 
-- **按位置映射**：Apple 的 GCExtendedGamepad 面键属性是固定几何位置，不是键帽字母。映射：`buttonB`→A、`buttonA`→B、`buttonY`→X、`buttonX`→Y、`buttonMenu`→+、`buttonOptions`→−。PS5 ○=A、×=B；Switch Pro 按位置（与标签一致）。
-- **Siri Remote 兜底**：只在没接全键手柄时接入——触控板→左摇杆，按下→A，Menu→B，播放/暂停→+。
-- **震动**：HD Rumble 数值清洗（振幅 [0,1]，低频/高频范围）→ intensity/sharpness，经 Core Haptics 按左右握把分侧。
-- **验收状态（进行中）**：映射、HD Rumble 与热插拔在 Linux 单测、tvOS 模拟器与真机共享内存自测里过了；真机上只连过 Siri Remote，PS5 DualSense / Switch Pro 实体手柄的全键输入与实际震感**还没验**（配对路径：设置 → 遥控器与设备 → 蓝牙）。只在模拟器上验过不算数。
+- **Map by position**: Apple's GCExtendedGamepad face-button properties are fixed geometric positions, not cap letters. Mapping: `buttonB`→A, `buttonA`→B, `buttonY`→X, `buttonX`→Y, `buttonMenu`→+, `buttonOptions`→−. PS5: ○=A, ×=B; Switch Pro: by position (matches its labels).
+- **Siri Remote fallback**: only when no full controller is connected — touchpad→left stick, click→A, Menu→B, play/pause→+.
+- **Rumble**: HD Rumble values are sanitized (amplitude [0,1], low/high frequency ranges) → intensity/sharpness, delivered per grip via Core Haptics.
+- **Verification status (in progress)**: mapping, HD Rumble, and hot-plug pass Linux unit tests, the tvOS simulator, and a shared-memory on-device self-test. On real hardware only the Siri Remote has been connected so far; full-button input and actual rumble feel on PS5 DualSense / Switch Pro controllers are **not yet verified** (pairing path: Settings → Remotes and Devices → Bluetooth). Simulator-only verification doesn't count.
 
-## 4.8 真机截图回传
+## 4.8 Getting screenshots off the device
 
-Apple TV 没有现成截屏命令，流程：
+Apple TV has no screenshot command. The flow:
 
-1. App 自己把 Metal 最新一帧读回，写 PNG + JSON 到 `Library/Caches`（可用 env 配置截图帧号/间隔/输出尺寸）。
-2. `devicectl device copy from` 取回（单文件约 1.4 s，App 不受影响）。
-3. **取回的 PNG 必须自己打开看**，并做语义像素断言（某区域应是某颜色/某形状），不能只比文件哈希。
+1. The app reads back its latest Metal frame and writes PNG + JSON to `Library/Caches` (frame number/interval/output size configurable via env).
+2. Retrieve with `devicectl device copy from` (~1.4 s per file, app unaffected).
+3. **Open every retrieved PNG yourself** and run semantic pixel assertions (a region should be a specific color/shape) — never compare by file hash alone.
 
-辅助：App 写完截图或到时间后自己退出，避免运行时 devicectl 文件服务被拖慢——游戏跑着时 copy from 会越来越慢直至卡死（CPU 满载 + 刚写约 18 GB Caches）。
+Helper: the app exits on its own after writing screenshots or on a timer, so the runtime devicectl file service isn't slowed down — copy-from while the game runs gets slower and slower until it stalls (CPU pegged + ~18 GB of freshly written Caches).
 
-## 4.9 多任务抢同一台设备
+## 4.9 Contending for one shared device
 
-只有一台 Apple TV 时：
+With one Apple TV:
 
-- **lease 串行**：派构建/真机任务带独占租约，同一时刻只有一个任务用 Mac 构建/真机。
-- **同包名互顶**：各任务包名相同时，`devicectl --terminate-existing` 会把对方正在跑的 App 顺手干掉；并行必须给不同包名。动森项目里 TV1 的跑局被 OPT1 同包名安装顶掉过。
-- **共享构建目录互顶**：多任务共用一个 build 目录会互相覆盖出包（未签名包顶掉签名包，被 codesign 拦下）；按工作树分目录。
-- **装包前互检**：部署脚本装包前检查设备上有没有别的「我们的」App 在跑，有就等（缺省 600 s）或显式不等。
-- **lease 挡不住不查 lease 的脚本**：动森 REL1 出包时，另一个任务用旧版部署脚本加 `FORCE_OTHER=1` 往同一包名装测试包，6 次装机自测被顶掉 4 次。互检逻辑要随部署脚本一起更新，别留 `FORCE_OTHER` 这类跳过互检的后门。
-- **按包名认进程，不按可执行文件名**：自测探活/超时终止用「已装 App 的 URL → 包名」映射（参数以 `.` 结尾按前缀匹配）。按 `…/DmTV.app/DmTV` 字符串匹配会把别人的同名可执行文件认成自己的。
-- **设备状态**：`devicectl list devices` 在 `available (paired)` 与 `connected` 间跳，两种状态下 install/copy/launch 都正常，闸门只拦 unavailable。
+- **Lease serialization**: build/device tasks carry an exclusive lease; only one task builds on the Mac or uses the device at a time.
+- **Same bundle ID evicts**: when tasks share a bundle ID, `devicectl --terminate-existing` kills the other side's running app. Parallel work needs distinct bundle IDs. In the ACNH project, TV1's run was evicted by OPT1's same-bundle-ID install.
+- **Shared build directories collide**: multiple tasks in one build directory overwrite each other's output (an unsigned build evicts the signed one, caught by codesign). Use per-worktree directories.
+- **Check before installing**: the deploy script checks whether another "ours" app is running on the device before installing, and waits (default 600 s) or explicitly doesn't.
+- **Leases can't stop scripts that don't check them**: during ACNH REL1 packaging, another task used an old deploy script with `FORCE_OTHER=1` to install test builds over the same bundle ID — 4 of 6 install self-tests were evicted. Keep the mutual-check logic in the deploy script itself; don't leave `FORCE_OTHER`-style backdoors.
+- **Identify processes by bundle ID, not executable name**: liveness probes and timeout kills use the "installed app URL → bundle ID" mapping (parameters ending in `.` match by prefix). Matching on a `…/DmTV.app/DmTV` string mistakes someone else's same-named executable for yours.
+- **Device state**: `devicectl list devices` flips between `available (paired)` and `connected`; install/copy/launch work in both, and the gate only blocks unavailable.
 
-## 4.10 模拟器跑不了图形层
+## 4.10 The simulator can't run the graphics layer
 
-据 d2r-mobile 官方 DmTV 的说明（它专门做了 Metal 4 启动探测界面）：tvOS 模拟器的 GPU 没有 Metal 4、不是统一内存、参数缓冲只到 tier-1，NVN→Metal 层起不来。我们自己的结果全部来自真机，没在模拟器上跑过图形层。图形相关验收只能真机；模拟器只适合验装载/服务/逻辑。
+Per d2r-mobile's official DmTV notes (it ships a Metal 4 launch-detection screen on purpose): the tvOS simulator GPU lacks Metal 4, isn't unified memory, and only supports argument buffers tier-1 — the NVN→Metal layer can't come up. All of our results come from real hardware; the graphics layer has never run in the simulator. Graphics acceptance is device-only; the simulator is only good for loading/services/logic.
 
-## 4.11 正式包：一条命令出包 + 装机 + 自测
+## 4.11 Release build: one command for package + install + self-test
 
-动森项目的发布流程（`tv_release.sh`）值得照搬：
+The ACNH project's release flow (`tv_release.sh`) is worth copying:
 
-- **一条命令跑完**：增量重编着色器 → 出包（约 350 MB）→ 装真机 → 逐个文件核对 RomFS（103,400 个文件，缺失/大小不符自动补推分片）→ 清掉 Caches 里的测试残留 → 自测 → 确认回主屏。RomFS 继续放 Caches 不打进包（见 4.4）：纹理包反正都在 Caches，打进包只让出包从约 1 分钟变成约 10 分钟，安装失败的代价也更大。
-- **自测判定全脚本化**：首帧时间、按计时退出、柜台截图语义断言（7/7）、音频电平（59 行电平里 56 行高于 −60 dBFS）、日志里没有按键脚本——全 PASS 才算完，任何一项 FAIL 不出包。
-- **节拍判定（pacing）**：自测加一项——出图间隔模式必须是 `game`，且各 300 帧窗帧时间 p50 的中位数大于 31 ms。快放包（柜台 p50 16.9 ms = 两倍速）会被这一项直接判 FAIL。判定逻辑要用真实日志和手动改坏的日志双向验过（真日志判 PASS，改成 display/16.9 ms 判 FAIL）。
-- **重装保留存档**：同包名覆盖安装，Caches 不删。存档在 `Caches/save*`，另有 tmp 备份 + NSUserDefaults 回执。进后台或退出前向系统要后台时间等存档备份做完再交还；备份与回执不符时下次启动重做（`present-differs-from-receipt`），两处都被清才丢档。
-- **收尾复核**：脚本之外再查一次——App 不在运行、设备上显示名正确、`Caches/env.txt` 与正式版逐字节一致、按键脚本是空文件。给用户的包停在主屏，点开就是新游戏/自己的存档。
+- **One command does everything**: incremental shader rebuild → package (~350 MB) → install on device → file-by-file RomFS verification (103,400 files; missing/sized-wrong chunks auto-pushed) → clean test residue out of Caches → self-test → confirm return to the home screen. RomFS stays in Caches, out of the bundle (see 4.4): the texture pack is in Caches anyway, so bundling RomFS only turns ~1 minute of packaging into ~10 minutes, and a failed install costs more.
+- **Self-test verdicts are fully scripted**: first-frame time, timer exit, counter screenshot semantic assertions (7/7), audio levels (56 of 59 level rows above −60 dBFS), no input scripts in the log — all PASS or the build doesn't ship.
+- **Pacing check**: the self-test also requires the present-interval mode to be `game`, and the median of per-300-frame-window p50s to be above 31 ms. A fast-forward build (counter p50 16.9 ms = double speed) fails this check outright. The verdict logic is validated both ways against real logs and deliberately corrupted ones (real logs PASS; display-mode/16.9 ms logs FAIL).
+- **Reinstall keeps saves**: same-bundle-ID over-the-top install doesn't delete Caches. Saves live in `Caches/save*`, with tmp backups + NSUserDefaults receipts. Before backgrounding or exiting, the app asks the system for background time and waits for save backup to finish; if backup and receipt disagree, the next launch redoes it (`present-differs-from-receipt`). A save is only lost if both locations are purged.
+- **Final sweep**: one more check outside the script — app not running, correct display name on device, `Caches/env.txt` byte-identical to the release version, input script is an empty file. The user's build sits at the home screen; tapping it starts a new game or their own save.
