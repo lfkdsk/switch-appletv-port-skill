@@ -55,12 +55,12 @@ Fixes (all in the replay layer, invisible to the game):
 - Dirty-page range lookup gets a per-thread small table (512 entries); the range table invalidates stale records by generation on register/unregister; hits return exactly what a linear scan would return now.
 - Upload staging blocks reused across batches by slot, instead of a fresh 32 MB allocation per batch — island streaming textures re-upload every frame, and the old path paid a 32 MB allocation plus residency register/unregister per frame.
 
-Measured after: on keting, instructions per outdoor draw 130k → ~11k; per-frame submit CPU 57–61 → 6.5–7.2 ms; frame time p50 84 → 28 ms; footprint peak 1,824 MiB. Mac island submit CPU 19.6 → 2.8 ms.
+Measured after: on the Apple TV, instructions per outdoor draw 130k → ~11k; per-frame submit CPU 57–61 → 6.5–7.2 ms; frame time p50 84 → 28 ms; footprint peak 1,824 MiB. Mac island submit CPU 19.6 → 2.8 ms.
 
 Two directions tried with no on-device gain, left off by default in the profile:
 
-- **Translation worker thread** (per d2r-mobile v1.0.15: game threads only enqueue, a dedicated thread replays): ~6% on Mac with uncapped frame rate; no A/B gain on keting — once submit is down to 7 ms the submit thread is off the critical path (GPU p95 ~26–27 ms; game logic runs on other threads).
-- **TBDR write-back speculation** (see 5.4): no GPU time reduction on keting.
+- **Translation worker thread** (per d2r-mobile v1.0.15: game threads only enqueue, a dedicated thread replays): ~6% on Mac with uncapped frame rate; no A/B gain on the Apple TV — once submit is down to 7 ms the submit thread is off the critical path (GPU p95 ~26–27 ms; game logic runs on other threads).
+- **TBDR write-back speculation** (see 5.4): no GPU time reduction on the Apple TV.
 
 A correction: an earlier suspicion that "the translation thread has QoS 0 (not on performance cores)" was wrong — the thread runs a real-time policy (priority 97), and real-time policies don't set QoS by design. Once submit got off the critical path, the QoS experiment was dropped.
 
@@ -100,11 +100,11 @@ Short control sections are the usual reason tables don't line up: agl/gsys packa
 
 ## 5.7 60 fps and game speed: fix fast-forward first, then talk speedups
 
-The 60 fps outdoor experiment on keting concluded: **not possible right now — neither route holds**.
+The 60 fps outdoor experiment on the Apple TV concluded: **not possible right now — neither route holds**.
 
 **Game side: uncapping the present interval means the whole game runs at double speed.** ACNH's logic is frame-counted — typewriter dialogue, HID polling, and time conversion all advance per frame; only audio runs on wall clock (~199 updates/second, identical across runs). A replay of the same input script on Mac: uncapped, 180 s produced 5,100 → 10,500 frames; after one A press, characters typed in 0.35 s went 5 → 13; music didn't speed up. Normal speed would need changes on the scale of the community SpeedFix: ~760–7,381 code patches + ~1,300 `StaticParam.pack` values (1.5× for the 45 fps version, 4× for 120 fps) — converting frame-counted logic to time-stepped.
 
-**GPU side: even the best outdoor mode exceeds the budget.** The bar is GPU p95 ≤ 15 ms and submit CPU ≤ 6 ms. keting outdoor measurements:
+**GPU side: even the best outdoor mode exceeds the budget.** The bar is GPU p95 ≤ 15 ms and submit CPU ≤ 6 ms. Apple TV outdoor measurements:
 
 | Combo | GPU p95 | Submit CPU |
 |---|---|---|

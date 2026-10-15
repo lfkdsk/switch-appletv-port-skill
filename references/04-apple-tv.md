@@ -48,7 +48,7 @@ ACNH RomFS: 103,400 files, 9.78 GiB. Three options:
 | Inside the app bundle | Installable, readable, not purged by Caches; costs bundle size and install time | 10.7 GB bundle; build 79 s; install 593 s |
 | LAN HTTP | Not implemented | The first two work, so it wasn't needed |
 
-Plain per-file copy is not viable: CoreDevice's small-file transactions are slow, and relay disconnects leave junk behind.
+Plain per-file copy is not viable: CoreDevice's small-file transactions are slow, and dropped connections leave junk behind.
 
 ## 4.5 A15 has no BC texture decode → the ASTC/EAC pack
 
