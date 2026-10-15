@@ -34,6 +34,7 @@
 | 六轴 / friends ABI | hid cmd 66 UNIMPL；friend:u cmd 0 被拒 | 缺 StartSixAxisSensor；friends 入口错误要求 PID | 补 cmd 66/67；去掉 PID 要求 |
 | HIPC Close 后 svcCloseHandle | `svcCloseHandle 0xe401` | HIPC Close 已提前删 session | 一次性 closed-session 记账 |
 | 离线服务语义 | 联网功能卡住 | 35 个联网服务需要「无网络」语义 | bsd Connect 回 ENETUNREACH、nifm 回 NoInternetConnection、ssl 回 NoConnection 等；未知命令响而不静默 |
+| 保存并结束后中止 | 「保存并结束」写完存档后 `nn::diag` 中止（Result 0） | `CalculateStandardUserSystemClockDifferenceByUser` 没接管，SDK 取空的 time 服务对象即 AbortImpl | HLE 接管该函数（语义照 Ryujinx `IStaticServiceForPsc` 命令 500：两份快照比用户时钟偏移）；偏移用纳秒差四舍五入去抖，否则两份快照凭空差 ±1 秒被误判改钟；稳定时钟来源号用宿主开机时刻 |
 
 ## NVN / 图形
 
@@ -63,6 +64,7 @@
 | 内存池过早驻留 | 未使用的池也占有线内存，4 GB 机型启动被杀 | 池创建时就放进驻留集 | 首次 GPU 取址时才驻留并当场提交（上游实测省约 0.5 GB） |
 | dirty-page tracker 竞态 | 游戏线程在缺页处理器里无限自旋 | 置只读时先标 PROT 再 mprotect，并发的「写前解保护」把状态改乱 | 状态机 NONE→BUSY→mprotect→PROT，等待者 BUSY 清除后重查，上限 2 s 报红 |
 | 显示节拍不回调 | 画面冻在黑帧，出图停在第 3 次 | CAMetalDisplayLink 在 Apple TV 上回调从不来 | 出图线程自取 drawable（env 可改回） |
+| 深度 EQUAL 预通道不变性 | 近处树冠/物体出现斜向黑网纹（像 z-fighting），动森旧库同情形树冠纯黑像素 10.92% | 游戏先画只写深度的预通道，再用**另一个**顶点着色器按深度 EQUAL 画颜色；MSL 标了 `[[position, invariant]]` 但 metal 编译没加 `-fpreserve-invariance`，Metal 不理 invariant，两个 VS 位置差末位，EQUAL 不过的像素留清屏色 | Mac/iOS/tvOS 的 metal 编译都加 `-fpreserve-invariance`，重编全库并更新链版本；修后同情形纯黑 0.00% |
 
 ## 音频
 
