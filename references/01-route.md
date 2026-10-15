@@ -1,94 +1,94 @@
-# 01 · 路线：为什么不模拟 CPU，以及各个选型
+# 01 · Route: why no CPU emulation, and the design choices
 
-读者是没做过这件事的工程师或 agent。先立概念，再讲原因。
+Written for engineers or agents who have never done this. Concepts first, then reasons.
 
-## 1.1 原生执行：同指令集是最大的便宜
+## 1.1 Native execution: the shared ISA is the big free win
 
-Switch 的 CPU 是 ARM Cortex-A57（ARMv8-A），Apple Silicon 也是 ARM64。游戏 NSO 里的机器码可以直接在 Apple CPU 上取指执行，不需要二进制翻译，更不需要整机模拟。
+The Switch CPU is an ARM Cortex-A57 (ARMv8-A); Apple Silicon is also ARM64. The machine code in a game NSO can be fetched and executed directly on the Apple CPU — no binary translation, let alone full-system emulation.
 
-这一条决定了整个项目的形态：
+This one fact shapes the whole project:
 
-| 决策 | 选择 | 原因 |
+| Decision | Choice | Why |
 |---|---|---|
-| CPU | 原生执行 + 离线改写少数指令 | 同指令集；模拟的性能代价白花 |
-| 系统服务 | 宿主 HLE | 游戏不直接碰内核，服务面固定且有文档 |
-| 图形 | NVN 接口层记录，提交时回放成 Metal | NVN 是游戏唯一的图形入口，接管点只有一个 |
-| 着色器 | 全离线翻译，运行时查库 | 手机上跑翻译链不现实；库可以随包带或首跑生成 |
+| CPU | Native execution + offline rewriting of a few instructions | Shared ISA; emulation's cost buys nothing |
+| System services | Host HLE | Games don't touch the kernel; the service surface is fixed and documented |
+| Graphics | Record at the NVN interface, replay to Metal at submit | NVN is the game's only graphics entry point — one interception point |
+| Shaders | Fully offline translation, runtime lookup | Running the translation toolchain on phone is impractical; the library ships with the app or is built on first run |
 
-代价也要清楚：游戏代码是为 Horizon 内核和 Tegra GPU 编译的，有一批指令和约定在 Apple 平台不成立，必须在装载前改写掉。改写是离线的、可对账的，不是运行时补丁。
+The cost is real too: the game's code was compiled for the Horizon kernel and a Tegra GPU, and a set of instructions and conventions don't hold on Apple platforms. They must be rewritten before loading. Rewriting is offline and reconcilable, not a runtime patch.
 
-## 1.2 改写哪些指令
+## 1.2 Which instructions get rewritten
 
-游戏把平台相关的东西收敛在少数几类指令里，改写器只碰这些：
+Games concentrate platform-specific behavior in a few instruction classes. The rewriter touches only these:
 
-| 指令/模式 | 游戏拿它做什么 | Apple 平台的问题 | 改写做法 |
+| Instruction / pattern | What the game uses it for | Problem on Apple | Rewrite |
 |---|---|---|---|
-| x18 访问 | Horizon 用 x18 做 TLS/影子寄存器 | Apple 平台保留 x18，语义不同 | 改成经键页槽间接寻址 |
-| `mrs/msr tpidr_el0`、`tpidrro_el0` | Horizon 的 TLS/TLR 指针 | Apple 用户态语义不同 | 改成宿主 KTLS/KTLR 槽 |
-| `svc #n` | Horizon 系统调用 | Apple 上 svc 是非法指令 | 跳转到宿主门函数，由宿主分发 |
-| `mrs cntpct/cntvct_el0` | 读系统计数器 | 频率不同 | 换成宿主单调时钟换算（19.2 MHz） |
-| `mrs ctr_el0` | 查缓存行几何，做缓存维护 | Apple 不向用户态暴露，执行就 SIGILL | 离线改成常量（128 B 缓存行） |
+| x18 accesses | Horizon uses x18 as TLS / shadow register | Apple reserves x18 with different semantics | Indirect through a key-page slot |
+| `mrs/msr tpidr_el0`, `tpidrro_el0` | Horizon TLS/TLR pointers | Different user-space semantics on Apple | Redirect to host KTLS/KTLR slots |
+| `svc #n` | Horizon syscalls | svc is an illegal instruction on Apple | Jump to a host gate function that dispatches |
+| `mrs cntpct/cntvct_el0` | System counter reads | Different frequency | Replace with host monotonic clock scaled to 19.2 MHz |
+| `mrs ctr_el0` | Cache-line geometry for cache maintenance | Not exposed to user space on Apple — SIGILL | Replace offline with the constant (128 B cache line) |
 
-不用改的：`fpcr/fpsr/nzcv/dczid_el0` 在 Apple EL0 可直接访问。
+Untouched: `fpcr/fpsr/nzcv/dczid_el0` are accessible at Apple EL0.
 
-一个对账教训：自动扫描把函数对齐填充的 nop 模式误报成十几万条「未知系统寄存器访问」，真实的系统寄存器访问只有 220 处。扫描结果要人工看形状，不能照单全收。
+A reconciliation lesson: an automated scan misreported function-alignment nop padding as over 100,000 "unknown system register accesses"; the real count was 220. Scan output needs human review of its shape, not blind acceptance.
 
-实测改写规模（动森，四个模块）：main 改 52,095 个 x18 站点 + 36 条 svc；sdk 改 15,559 个 x18；subsdk0 改 9,784 个；rtld 9 个。改完和扫描数逐条闭合。
+Measured rewrite scale (ACNH, four modules): main — 52,095 x18 sites + 36 svc; sdk — 15,559 x18; subsdk0 — 9,784; rtld — 9. Every count reconciled with the scan.
 
-## 1.3 HLE 做在哪一层：两条路都走通过
+## 1.3 Where HLE lives: both layers have been made to work
 
-游戏拿系统服务有两条路径：调 SDK 导出的 `nn::*` 函数（SDK 内部再走 IPC），或自己发 svc/IPC。宿主顶替也对应两层：
+Games reach system services two ways: calling SDK-exported `nn::*` functions (which do IPC internally), or issuing svc/IPC themselves. Host substitution has two corresponding layers:
 
-| | 导入层 HLE | svc/IPC 服务层 HLE |
+| | Import-layer HLE | svc/IPC service-layer HLE |
 |---|---|---|
-| 做法 | sdk NSO 加载，但它的服务函数在导入层被整体替换成宿主实现 | 真 sdk NSO 原样跑（含它的 IPC 编组），宿主实现 Horizon 服务端 |
-| 优点 | 起步快：第三方游戏的 SDK 调用面相对收敛 | 行为保真：SDK 内部状态机不被切断；服务面固定（约 60 个），可对照 Ryujinx 实现 |
-| 代价 | 每代 SDK 的差异要逐个逆向；SDK 内部状态机被绕过，行为偏差风险高 | IPC 框架是新代码，调试面大；要实现 HIPC/CMIF/TIPC 编组 |
-| 谁走通过 | smbw 路线：main 的 1,015 个导入里 394 个钩子命中，一路改到岛上可玩 | nx 路线：1,007 个强导入全部由真 sdk/subsdk0 解析，未解析 = 0，跑到第一帧 |
+| Approach | Load the sdk NSO, but replace its service functions wholesale at the import layer with host implementations | Run the real sdk NSO as-is (including its IPC marshalling); the host implements the Horizon server side |
+| Strengths | Fast start: third-party games have a relatively small SDK call surface | Behavioral fidelity: the SDK's internal state machines stay intact; the service surface is fixed (~60 services) and can be implemented against Ryujinx |
+| Costs | Each SDK generation's differences need reverse engineering; bypassing SDK state machines risks behavioral drift | The IPC framework is new code with a large debug surface; requires HIPC/CMIF/TIPC marshalling |
+| Proven by | smbw route: 394 of main's 1,015 imports hooked, playable on the island | nx route: all 1,007 strong imports resolved by real sdk/subsdk0, unresolved = 0, reached first frame |
 
-选型依据：第一方游戏（如动森）全套使用 `nn::*` 且 SDK 版本新，导入层估计要顶替上千个符号，服务层更稳；第三方游戏 SDK 调用面收敛，导入层更快。拿不准就看普查数字：导入符号少、SDK 旧 → 导入层；导入符号多、SDK 新 → 服务层。
+Selection criteria: first-party games (like ACNH) use `nn::*` throughout with a recent SDK — import-layer HLE would mean substituting a thousand-plus symbols, so the service layer is safer. Third-party games have a smaller SDK surface, so import-layer HLE is faster. When unsure, look at the survey numbers: few imports + old SDK → import layer; many imports + new SDK → service layer.
 
-## 1.4 NVN→Metal：记录-回放架构
+## 1.4 NVN→Metal: record-and-replay architecture
 
-游戏侧只 import 一个 NVN 符号 `nvnBootstrapLoader`，其余几百个 NVN API 都经它按名取址。宿主强占这一个符号，就接管了全部图形入口。
+Games import exactly one NVN symbol, `nvnBootstrapLoader`, and fetch the other several hundred NVN APIs by name through it. Seizing that one symbol takes over the entire graphics entry.
 
-两层结构：
+Two layers:
 
-1. **接口层**：游戏调 NVN API 时，宿主把命令录进游戏自管的命令内存（对象创建、状态设置、绘制调用），不碰 Metal。
-2. **回放层**：submit 时，宿主遍历命令流，重放成 Metal 命令缓冲。
+1. **Interface layer**: when the game calls an NVN API, the host records the command (object creation, state setup, draw calls) into game-managed command memory. No Metal involved.
+2. **Replay layer**: at submit, the host walks the command stream and replays it into a Metal command buffer.
 
-为什么这样分：游戏的 NVN 调用是多线程的、高频的；Metal 编码放在提交点做，可以和游戏线程重叠。上游后来把回放+编码挪到独立翻译线程，与游戏逻辑重叠一帧。
+Why split this way: NVN calls are multithreaded and high-frequency; doing Metal encoding at the submit point overlaps with game threads. Upstream later moved replay+encoding to a dedicated translation thread, overlapping game logic by one frame.
 
-几个关键设计：
+Key design points:
 
-- **内存池零拷贝**：统一内存设备上 GPU 地址 = CPU 地址，图形内存池直接做成 MTLBuffer，不复制。只支持统一内存设备（A14/M1 起）。
-- **对象大小按 SDK 头**：宿主记录的 NVN 对象尺寸必须和游戏 SDK 头文件一致（如 NVNtextureView 16 字节）。大了会写穿相邻内存，表现为画面出现 inf/nan。每个对象加静态断言。
-- **内存按需驻留**：池创建时不放进 Metal 驻留集，GPU 第一次取址时才驻留并当场提交。上游实测省约 0.5 GB 有线内存。
-- **管线按状态哈希缓存**，启动时按预热清单后台编译（见 05）。
+- **Zero-copy memory pools**: on unified-memory devices GPU address equals CPU address, so graphics memory pools are plain MTLBuffers — no copies. Unified-memory devices only (A14/M1 and up).
+- **Object sizes follow the SDK headers**: host-recorded NVN object sizes must match the game's SDK headers (e.g. NVNtextureView is 16 bytes). Oversized writes bleed into adjacent memory, showing up as inf/nan on screen. Add a static assertion per object.
+- **On-demand residency**: pools are not placed in the Metal residency set at creation; the first GPU address fetch makes them resident and commits the set immediately. Measured savings upstream: ~0.5 GB of wired memory.
+- **Pipelines cached by state hash**, compiled in the background at launch from a prewarm manifest (see 05).
 
-## 1.5 着色器：全离线翻译
+## 1.5 Shaders: fully offline translation
 
-Switch 游戏的着色器是 Maxwell 机器码（BNSH 容器），Metal 不认识。翻译链：
+Switch game shaders are Maxwell machine code (BNSH containers), which Metal doesn't understand. The toolchain:
 
 ```
-Maxwell 机器码 → Ryujinx 翻译器（vendored，MIT）→ SPIR-V → spirv-cross → MSL → xcrun metal/metallib
+Maxwell machine code → Ryujinx translator (vendored, MIT) → SPIR-V → spirv-cross → MSL → xcrun metal/metallib
 ```
 
-要点：
+Key points:
 
-- **键是控制段内容哈希。** BNSH 的控制段描述资源绑定（贴图、采样器、常量缓冲槽号），机器码本身恢复不出这些。翻译产物按控制段哈希入库，运行时查表。短控制段（0x848/0x854 字节）只哈希它自报的长度，否则装载期改写的指针会让每次哈希都不同。
-- **机器码恢复不出的事实放 sidecar**：阶段、槽号、compute 工作组大小等，以 JSON 随库走。
-- **翻译链版本化**：链上源码+选项+工具指纹哈希，宿主只加载匹配版本的库，防止换了翻译器还吃旧库。
-- **几何着色器降级**：Metal 没有 geometry stage。动森的 4 个 GS（全是海面）走 compute prepass：vs_prepass + gs_prepass + vs_passthrough 三入口同库。
-- **翻译器会崩**：Ryujinx 翻译器在个别 shader 上抛异常（表达式内联、被移除的 local 仍作输出指针），要在翻译器侧修，不要绕。
+- **The key is a hash of the control-section content.** The BNSH control section describes resource bindings (textures, samplers, constant-buffer slot numbers); the machine code alone can't recover them. Translation outputs are keyed by control-section hash and looked up at runtime. Short control sections (0x848/0x854 bytes) are hashed only over their self-reported length — otherwise load-time pointer rewrites make every hash different.
+- **Facts the machine code can't recover go in a sidecar**: stage, slot numbers, compute workgroup sizes, as JSON shipped with the library.
+- **Version the toolchain**: hash the chain's source + options + tool fingerprints; the host loads only libraries matching its version, so a translator change can't silently consume stale output.
+- **Geometry shader fallback**: Metal has no geometry stage. ACNH's 4 GS (all ocean surface) go through a compute prepass: vs_prepass + gs_prepass + vs_passthrough, three entry points in one library.
+- **The translator crashes**: the Ryujinx translator throws on some shaders (expression inlining, removed locals still used as output pointers). Fix it in the translator — don't route around it.
 
-替代方案（社区 nx-port 的做法）：bring-up 期不预置着色器表，运行时记录游戏用到的着色器，事后再翻译。首跑画面是坏的，但能最快见到第一帧；正式版再回离线表。
+Alternative (the nx-port approach): skip the prebuilt shader table during bring-up; record shaders the game uses at runtime and translate afterward. The first run looks broken but reaches first frame fastest; return to the offline table for the real build.
 
-## 1.6 多游戏策略：profile 还是开关
+## 1.6 Multi-game strategy: profiles vs flags
 
-要支持多个游戏，差异往哪放：
+Where game-specific differences live when supporting multiple games:
 
-- **game profile（nxnative 的做法）**：每游戏一个目录，写清标题号、build、模块、RomFS 标记、NVN 常量表、着色器表。工具没有 profile 就停。改写剪口、固定地址行为全部按 NSO build ID 键控，绝不让固定地址跑在没验证过的 build 上。
-- **环境开关（nx-port 的做法）**：差异行为全放 env 开关后，bring-up 脚本默认全开。适合快速试验，长期会乱。
+- **Game profile (the nxnative approach)**: one directory per game with title ID, build, modules, RomFS markers, NVN constant tables, shader tables. Tools stop without a profile. Rewrite cut points and fixed-address behavior are all keyed by NSO build ID — never let a fixed address run against an unverified build.
+- **Environment flags (the nx-port approach)**: all divergent behavior behind env flags, all on by default in bring-up scripts. Fast for experiments, messy long-term.
 
-动森这种更新频繁的游戏，profile 的 build 并集机制更对口。
+For frequently updated games like ACNH, the profile's build-union mechanism fits better.
