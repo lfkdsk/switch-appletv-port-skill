@@ -53,6 +53,9 @@ description: Distilled playbook for porting Nintendo Switch games to run nativel
 | 首帧要几分钟 | 05：大概率不是 PSO，是文件系统大小写查找 |
 | 画面冻在黑帧不出图 | 04：CAMetalDisplayLink 在 Apple TV 上不回调 |
 | 帧率低 | 05：先量提交 CPU / GPU / 每 draw 指令数；动森户外的瓶颈是每次绘制线性扫约 3,000 个内存池（13 万→1.1 万指令，p50 84→28 ms） |
+| 游戏两倍速，音乐不跟着快 | 05：出图间隔口径钉成 `game`（30 帧节拍）；逻辑按帧计数，抬帧率就是快放开关 |
+| 近处物体黑网纹（树冠斜纹） | 03：深度预通道 EQUAL 要 `-fpreserve-invariance`，MSL 标了 invariant 但编译没加等于没标 |
+| 保存并结束后中止 | 03：`CalculateStandardUserSystemClockDifferenceByUser` 要接管，SDK 取空 time 服务对象即中止 |
 
 ## references 地图
 
