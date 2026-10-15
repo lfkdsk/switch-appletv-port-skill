@@ -52,7 +52,7 @@ description: Distilled playbook for porting Nintendo Switch games to run nativel
 | 真机被系统杀掉 | 04：2.05 GiB 上限、按需驻留、纹理包 |
 | 首帧要几分钟 | 05：大概率不是 PSO，是文件系统大小写查找 |
 | 画面冻在黑帧不出图 | 04：CAMetalDisplayLink 在 Apple TV 上不回调 |
-| 帧率低 | 05：先量 CPU 提交时间和 GPU 时间，瓶颈多半在 CPU 提交 |
+| 帧率低 | 05：先量提交 CPU / GPU / 每 draw 指令数；动森户外的瓶颈是每次绘制线性扫约 3,000 个内存池（13 万→1.1 万指令，p50 84→28 ms） |
 
 ## references 地图
 
