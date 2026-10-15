@@ -1,88 +1,88 @@
-# 03 · 第一帧前的坑目录（症状 → 定位 → 修法）
+# 03 · Pitfall catalog before first frame (symptom → diagnosis → fix)
 
-每条都是动森移植里实际撞到并修好的。来源是两条路线的工程报告（nx 路线 P2a/P2b/P2c、smbw 路线 Z1/T2/T3/OPT1 等）。按症状查，不按顺序读。
+Every entry was actually hit and fixed during the ACNH port. Sources are engineering reports from both routes (nx route P2a/P2b/P2c, smbw route Z1/T2/T3/OPT1 and others). Look up by symptom; don't read in order.
 
-## 装载 / 改写 / 内核
+## Loading / rewriting / kernel
 
-| 坑 | 症状 | 定位 | 修法 |
+| Pitfall | Symptom | Diagnosis | Fix |
 |---|---|---|---|
-| BKTR | hactool 解更新 NCA 报 `Invalid BKTR layout!` | hactool 对新 BKTR 布局的已知问题 | 换 LibHac 0.19.0 写等价 CLI |
-| DT_RELR | 装载后 SIGSEGV，错地址是链接期原值，重定位计数为 0 | 新 SDK 用 DT_RELR 打包相对重定位，loader 只认 RELA | loader 加 RELR 应用；动森 391,693 个槽 |
-| ctr_el0 | sdk 缓存行查询代码在 Apple 上 SIGILL | Apple 不向用户态暴露缓存拓扑 | 离线改写为常量（128 B 缓存行），签名前改 |
-| W^X | tvOS 上不能把匿名页改可执行 | tvOS 代码签名约束 | 改写后模块进签名 framework / 嵌进 `__TEXT`，运行时 vm_remap 共享已签名 RX 页 |
-| 场景看门狗 | 启动约 20 s 被系统杀（0x8BADF00D） | 首次解包堵在主线程 | 主线程立即返回，解包与客体宿主全放后台队列（修后解包 80 s 存活） |
-| 小文件传输 | 10 万个 RomFS 文件直接推设备，5 分钟推不动还断线留残文件 | CoreDevice 逐文件事务 | 串流归档切 500 MiB 分片 + 就绪标记 + 设备侧 staging 原子发布 |
-| 堆大小算错 | 启动时往宿主代码地址建堆，SIGBUS | `GetInfo(UsedMemorySize)` 没算已装载模块，游戏拿 total−used 当堆 | 已用量 = 堆 + 映像字节 + 64 MB |
-| core=-2 | 第 15–63 帧崩，坏指针跨 run 逐字节不变 | `svcCreateThread(core=-2)` 未解析，`-2` 被当数组下标 | IdealCoreUseProcessValue(-2) 解析为真实 core 0 |
-| 改写背锅嫌疑 | 怀疑改写破坏原子序列/堆未清零 | 独占区间审计：改写点落在 LDXR/STXR 区间内 = 0；坏值确定性 | 排除改写/堆/随机源，指向 core=-2 这类逻辑坑 |
+| BKTR | hactool fails on update NCAs with `Invalid BKTR layout!` | Known hactool issue with new BKTR layouts | Switch to LibHac 0.19.0, write an equivalent CLI |
+| DT_RELR | SIGSEGV after loading at link-time addresses; relocation count is 0 | New SDKs pack relative relocations with DT_RELR; the loader only knows RELA | Add RELR application to the loader; ACNH has 391,693 slots |
+| ctr_el0 | The sdk's cache-line query code SIGILLs on Apple | Apple doesn't expose cache topology to user space | Rewrite to a constant (128 B cache line) offline, before signing |
+| W^X | Anonymous pages can't be made executable on tvOS | tvOS code-signing constraints | Put rewritten modules in a signed Guest.framework / embed in `__TEXT`; vm_remap the signed RX pages at runtime |
+| Scene watchdog | Killed by the system ~20 s after launch (0x8BADF00D) | First-time unpacking blocks the main thread | Return from the main thread immediately; run unpacking and the guest host on background queues (survived 80 s of unpacking after the fix) |
+| Small-file transfer | Pushing 100k RomFS files to the device: 5 minutes with no progress, disconnects leave junk | CoreDevice's per-file transactions | Stream an archive in ≤500 MiB chunks + a readiness marker + atomic staging publish on the device |
+| Wrong heap size | SIGBUS at launch building a heap at host code addresses | `GetInfo(UsedMemorySize)` ignores loaded modules; the game takes total−used as its heap | Used = heap + image bytes + 64 MB |
+| core=-2 | Crashes at frames 15–63; the bad pointer is byte-identical across runs | `svcCreateThread(core=-2)` unresolved; `-2` used as an array index | Resolve IdealCoreUseProcessValue(-2) to real core 0 |
+| Rewriter false suspicion | Suspected the rewriter broke atomic sequences / didn't zero the heap | Exclusive-range audit: zero rewrite sites inside LDXR/STXR ranges; bad values are deterministic | Rule out the rewriter/heap/randomness; point at logic bugs like core=-2 |
 
-## 服务 / IPC
+## Services / IPC
 
-| 坑 | 症状 | 定位 | 修法 |
+| Pitfall | Symptom | Diagnosis | Fix |
 |---|---|---|---|
-| 预选用户 | 启动停在用户选择 | `PopLaunchParameter(PreselectedUser)` 返回 NotAvailable | 提供本地预选用户 IStorage |
-| 严格 CMIF ABI | 真机请求被框架 ABI 校验拒绝 | 游戏实际请求的 payload/PID/OutPointer 尺寸与桩不符 | 按真实编码修正；对全部命令做 ABI 审计（动森审 105 条） |
-| NVN API 版本 | 空指针 | NVN API major 53 不满足游戏要求 | 返回 major 55 |
-| SetShadersExt 布尔 | 空地址 | `nvnProgramSetShadersExt` 是 bool，通用桩返回 0 | SetShaders/Ext 返回 1 |
-| NVN 对象表耗尽 | 启动期崩溃 | 2,048 固定对象表不够 | 动态链式哈希 + Finalize 回收 |
-| 周期事件不 signal | 窗口创建后画面静止 | VI vsync、audren 事件永不置位 | 周期事件（16.67 ms / 5 ms）deadline 接入 WaitSynchronization |
-| 死锁 | 主线程无限 WaitForAddress | 非周期事件（audren cmd 12、nfp cmd 23）永不置位，guest 无限等 | 补事件唤醒覆盖；句柄集含周期事件时降级为定时等待（缓解） |
-| 服务直连 | 游戏自己 hipc 连 olsc:u，连不上就中止 | 不经 SDK 服务库的直连 + domain 报文 | 三个 hipc 入口强制接管，假会话就地应答 CMIF（含 16 字节 domain 头） |
-| 时钟快照 | nn::time 中止 | ClockSnapshot 走 time 服务 | 按 0xD0 字节布局填快照 + 时区规则 |
-| applet 资源归属 | OpenAudioRenderer 里 Abort | SDK 20 要求 GetAppletResourceUserId 非 0 | 给固定非 0 值 |
-| 共享字体 | nn::sm::Initialize 中止 | RequestSharedFontLoad/GetSharedFont 没接管 | 空操作 + 按 0x18 步长回填；或宿主字体快照 |
-| 六轴 / friends ABI | hid cmd 66 UNIMPL；friend:u cmd 0 被拒 | 缺 StartSixAxisSensor；friends 入口错误要求 PID | 补 cmd 66/67；去掉 PID 要求 |
-| HIPC Close 后 svcCloseHandle | `svcCloseHandle 0xe401` | HIPC Close 已提前删 session | 一次性 closed-session 记账 |
-| 离线服务语义 | 联网功能卡住 | 35 个联网服务需要「无网络」语义 | bsd Connect 回 ENETUNREACH、nifm 回 NoInternetConnection、ssl 回 NoConnection 等；未知命令响而不静默 |
-| 保存并结束后中止 | 「保存并结束」写完存档后 `nn::diag` 中止（Result 0） | `CalculateStandardUserSystemClockDifferenceByUser` 没接管，SDK 取空的 time 服务对象即 AbortImpl | HLE 接管该函数（语义照 Ryujinx `IStaticServiceForPsc` 命令 500：两份快照比用户时钟偏移）；偏移用纳秒差四舍五入去抖，否则两份快照凭空差 ±1 秒被误判改钟；稳定时钟来源号用宿主开机时刻 |
+| Preselected user | Launch stalls at user selection | `PopLaunchParameter(PreselectedUser)` returns NotAvailable | Provide a local preselected-user IStorage |
+| Strict CMIF ABI | Real-device requests rejected by the framework's ABI checks | The game's actual payload/PID/OutPointer sizes don't match the stubs | Fix per the real encoding; ABI-audit every command (105 audited for ACNH) |
+| NVN API version | Null pointer | NVN API major 53 doesn't satisfy the game's requirement | Return major 55 |
+| SetShadersExt bool | Null address | `nvnProgramSetShadersExt` is a bool; the generic stub returns 0 | SetShaders/Ext return 1 |
+| NVN object table exhaustion | Crash during startup | The fixed 2,048-entry object table is too small | Dynamic chained hashing + Finalize reclamation |
+| Periodic events never signal | Static image after window creation | VI vsync and audren events never fire | Wire periodic events (16.67 ms / 5 ms) deadlines into WaitSynchronization |
+| Deadlock | Main thread waits on an address forever | Non-periodic events (audren cmd 12, nfp cmd 23) never fire; the guest waits forever | Add event-wake coverage; when a handle set contains periodic events, degrade to timed waits (mitigation) |
+| Direct service connection | The game hipc-connects to olsc:u itself and aborts on failure | Direct connection bypassing the SDK service library + domain messages | Force-takeover at the three hipc entry points; answer CMIF in place with a fake session (including the 16-byte domain header) |
+| Clock snapshot | nn::time abort | ClockSnapshot goes through the time service | Fill the snapshot per the 0xD0-byte layout + timezone rules |
+| Applet resource ownership | Abort inside OpenAudioRenderer | SDK 20 requires GetAppletResourceUserId ≠ 0 | Return a fixed non-zero value |
+| Shared font | nn::sm::Initialize abort | RequestSharedFontLoad/GetSharedFont not taken over | No-op + fill back at 0x18 stride; or a host font snapshot |
+| Six-axis / friends ABI | hid cmd 66 UNIMPL; friend:u cmd 0 rejected | Missing StartSixAxisSensor; the friends entry wrongly requires a PID | Add cmds 66/67; drop the PID requirement |
+| svcCloseHandle after HIPC Close | `svcCloseHandle 0xe401` | HIPC Close already deleted the session | One-time closed-session accounting |
+| Offline service semantics | Online features hang | 35 online services need "no network" semantics | bsd Connect returns ENETUNREACH, nifm returns NoInternetConnection, ssl returns NoConnection, etc.; unknown commands respond, never stay silent |
+| Abort after "Save and end" | `nn::diag` abort (Result 0) right after the save finishes | `CalculateStandardUserSystemClockDifferenceByUser` not taken over; the SDK aborts on a null time service object | HLE the function (semantics per Ryujinx `IStaticServiceForPsc` cmd 500: compare two snapshots for the user clock offset). Round the nanosecond offset to debounce — otherwise two snapshots differ by ±1 s out of nowhere and read as a clock change; use the host's boot time as the steady clock source |
 
-## NVN / 图形
+## NVN / graphics
 
-| 坑 | 症状 | 定位 | 修法 |
+| Pitfall | Symptom | Diagnosis | Fix |
 |---|---|---|---|
-| CallCommands 未回放 | 首 present 只有 3 个 pass / 0 个 draw | `nvnCommandBufferCallCommands/CopyCommands` 未录 | 录成 OP_CALL 递归回放；命令内存按 4 KiB 宿主段补充并拒越界段 |
-| runtime shader 入口名 | shader 链接错 | 打包器把 SPIR-V 反射入口 `main` 当 metallib 入口 | 从 MSL 的 vertex/fragment/kernel 声明取实际入口 |
-| 清单外 shader | 缺 2 个 shader | 静态清单之外的运行时捕获 | 运行时捕获 → 翻译 → runtime 包 |
-| DrawElementsBaseVertex | 每帧只有 1 个 draw | 缺 `nvnCommandBufferDrawElementsBaseVertex` | 补齐 indexed/base-vertex 录制与回放 |
-| 顶点属性号 | shader 资源全错 | 顶点属性把 SPIR-V id 当 NVN location；cbuf/C1/driver bank、texture、storage 槽位不符 NVN ABI | 按 NVN ABI 重建 reflection，运行时补 c1/driver0/driver2/ubo_ptr |
-| TextureView 16 B | 合成矩阵出现 inf/nan | 游戏的 NVNtextureView 只有 16 B，宿主 36 B 的 defaults 写穿相邻视口矩形 | view_t 压为严格 16 B + 静态断言固定 ABI |
-| NEAR_IS_MINUS_W | 合成 quad 被 Metal 裁掉 | NVN 默认深度约定接受 z∈[-w,w]，Metal 只接受 [0,w] | 打包所有 VS 时在返回前做 z=(z+w)*0.5（动森重打 3,117 个 VS） |
-| ReportCounter {0,t} | UI 已画好但最终帧仍黑；条件清除全放行擦掉同帧 UI | TIMESTAMP 错写 {t,t}；Maxwell ZERO report 应写 {0,t} | post-op 写回 {counter=0, timestamp=t}，不反转条件、不跳清除 |
-| 条件清除 | 柜台背景隔几帧整帧黑；TBDR 开时 3D 背景整张黑 | 计数归 0 放在 GPU 完成回调，下一帧编码时还读到 1，清除多执行一遍；写回前瞻把条件渲染下未执行的清除当「后面会盖掉」 | 计数字段在编码时按序写 0，完成回调只写时戳；写回前瞻不把条件渲染下的清除记进索引 |
-| snapshot 抢跑 | 帧内快照偶尔读到旧内容 | snapshot 在 legacy queue 抢跑于尚未提交的 replay command buffer | snapshot copy 留在同一 replay command buffer |
-| 字体 CPU 写线性贴图（排除项） | 对话框中文与名牌字不显示 | 曾怀疑 A15 线性贴图/CPU 写可见性；GPU 读回五条路逐项排除——线性贴图本身没问题 | 真因是下一条 typed view，别在这条上耗时间 |
-| texture2d_array vs 2D | 电视上文字不显示，Mac 正常；3D 场景暗 15–30% | 文字片元着色器把字形缓存声明成 `texture2d_array` 从第 0 层取样，宿主绑的是 2D 视图；Metal 里类型不一致是未定义行为，M 系列碰巧读对、A15 读出 0，alpha≤0 全 discard | 按着色器声明类型在同一存储上另建视图（2D↔2D 数组、立方↔立方数组、立方→2D） |
-| alpha 测试 | 树冠/草镂空画成黑块 | NVN ColorState 固定功能 alpha 测试（GEQUAL 0.16），Metal 没有 | 离线给片元着色器注入 discard（按函数常量），回放把 alpha 函数与参考值并进管线键 |
-| 短控制段 shader | 47 个「着色器不在映射表」 | agl/gsys 包控制段只有 0x848/0x854 字节，且控制段后紧跟装载期改写的指针，按固定长度取哈希每次键都不同 | 控制段自报长度短于 0x880 时只哈希它自己（表 6,536→9,742） |
-| 计算 shader 无头 | 计算 shader 拆不出来 | 动森 BNSH 计算代码区指令从 +0 起，没有 0x30 头 | 拆分脚本计算阶段允许无头 |
-| Ryujinx 翻译崩溃 | 18 个 CS 翻译抛 InvalidCastException、1 个 PS KeyNotFound | AstOptimizer 把表达式内联回 Call 参数；被移除的 local 仍作 call output pointer | CallArgumentPrepass：非 local 表达式先 materialize 成临时 local，pointer 参数重新加入 Locals |
-| GS 无法编译 | 4 个 GS 生成的 MSL 有 `unknown` 类型 | Metal 无 geometry stage | compute prepass 三入口降级（见 01） |
-| texpack mmap 放不下 | 7.3 GiB 纹理包整包 mmap 失败 | tvOS 无 EVA 时进程地址空间累计约 7 GB | 只读索引（头+条目表约 3.9 MB）+ 数据按需 pread |
-| 纹理视图换格式 | 替换包最易漏的一条 | 游戏调上千次 nvnTextureViewSetFormat，视图里重指定的 BC 格式必须一起翻 | 视图按底图 ASTC/EAC 格式建；GetStorageSize 照旧返回原始 BC 字节 |
-| BC5_SNORM 不能走 ASTC | 法线图转 ASTC 后采样值 [-1,1]→[0,1]，n.z 全错 | ASTC LDR 无有符号模式，改采样要改着色器 | 走 EAC_RG11Snorm（块字节相同、语义精确、Apple GPU 全系支持、不改着色器） |
-| render pass 中途深度/模板清除 | 红行「通道中途的深度模板清除未实现」，后续绘制拿旧深度测试 | 游戏在 pass 中途发深度/模板清除 | 结束当前 pass，把清除挂到下一个 pass（颜色附件照旧 load）；清除 scissor 不覆盖深度目标的情形保留红行 |
-| 内存池过早驻留 | 未使用的池也占有线内存，4 GB 机型启动被杀 | 池创建时就放进驻留集 | 首次 GPU 取址时才驻留并当场提交（上游实测省约 0.5 GB） |
-| dirty-page tracker 竞态 | 游戏线程在缺页处理器里无限自旋 | 置只读时先标 PROT 再 mprotect，并发的「写前解保护」把状态改乱 | 状态机 NONE→BUSY→mprotect→PROT，等待者 BUSY 清除后重查，上限 2 s 报红 |
-| 显示节拍不回调 | 画面冻在黑帧，出图停在第 3 次 | CAMetalDisplayLink 在 Apple TV 上回调从不来 | 出图线程自取 drawable（env 可改回） |
-| 深度 EQUAL 预通道不变性 | 近处树冠/物体出现斜向黑网纹（像 z-fighting），动森旧库同情形树冠纯黑像素 10.92% | 游戏先画只写深度的预通道，再用**另一个**顶点着色器按深度 EQUAL 画颜色；MSL 标了 `[[position, invariant]]` 但 metal 编译没加 `-fpreserve-invariance`，Metal 不理 invariant，两个 VS 位置差末位，EQUAL 不过的像素留清屏色 | Mac/iOS/tvOS 的 metal 编译都加 `-fpreserve-invariance`，重编全库并更新链版本；修后同情形纯黑 0.00% |
+| CallCommands not replayed | First present has only 3 passes / 0 draws | `nvnCommandBufferCallCommands/CopyCommands` not recorded | Record as OP_CALL for recursive replay; grow command memory in 4 KiB host segments and reject out-of-range segments |
+| Runtime shader entry name | Shader link error | The packager takes the SPIR-V reflection entry `main` as the metallib entry | Take the real entry from the MSL vertex/fragment/kernel declarations |
+| Shaders outside the manifest | 2 shaders missing | Runtime capture beyond the static manifest | Runtime capture → translation → runtime package |
+| DrawElementsBaseVertex | Only 1 draw per frame | `nvnCommandBufferDrawElementsBaseVertex` missing | Add indexed/base-vertex recording and replay |
+| Vertex attribute numbers | All shader resources wrong | Vertex attributes used SPIR-V ids as NVN locations; cbuf/C1/driver bank, texture, and storage slots don't match the NVN ABI | Rebuild reflection per the NVN ABI; fill c1/driver0/driver2/ubo_ptr at runtime |
+| TextureView 16 B | inf/nan in the synthetic matrix | The game's NVNtextureView is only 16 B; the host's 36 B defaults overwrite adjacent viewport rectangles | Shrink view_t to a strict 16 B + static_assert the ABI |
+| NEAR_IS_MINUS_W | The synthetic quad is clipped by Metal | NVN's default depth convention accepts z∈[-w,w]; Metal only accepts [0,w] | When packaging all VS, do z=(z+w)*0.5 before returning (3,117 VS repackaged for ACNH) |
+| ReportCounter {0,t} | UI is drawn but the final frame is still black; a conditional clear passes everything and wipes same-frame UI | TIMESTAMP wrongly written {t,t}; Maxwell ZERO reports should write {0,t} | Write back {counter=0, timestamp=t} in the post-op; don't invert the condition or skip the clear |
+| Conditional clears | The counter background goes fully black for a few frames at a time; with TBDR on, the whole 3D background is black | Counter reset to 0 happens in the GPU completion callback, so the next frame's encode still reads 1 and the clear runs twice; write-back speculation treats clears under conditional rendering as "will be overwritten later" | Write counter fields to 0 in order at encode time; the completion callback writes only timestamps. Don't index clears under conditional rendering for write-back speculation |
+| Snapshot race | In-frame snapshots occasionally read stale content | The snapshot runs ahead on the legacy queue, before the replay command buffer is submitted | Keep the snapshot copy in the same replay command buffer |
+| Font CPU-write linear textures (ruled out) | Dialogue Chinese text and nameplate glyphs don't show | Linear texture / CPU-write visibility was suspected; five GPU readback paths ruled it out one by one — linear textures are fine | The real cause is the next entry (typed view). Don't spend time here |
+| texture2d_array vs 2D | Text missing on TV, fine on Mac; 3D scenes 15–30% darker | The text fragment shader declares the glyph cache as `texture2d_array` and samples layer 0; the host bound a 2D view. Type mismatch is undefined behavior in Metal — M-series happens to read it right, A15 reads 0, alpha≤0 discards everything | Create a second view on the same storage matching the shader's declared type (2D↔2D array, cube↔cube array, cube→2D) |
+| Alpha test | Tree canopies / grass cutouts render as black blocks | NVN ColorState fixed-function alpha test (GEQUAL 0.16) has no Metal equivalent | Inject discard into fragment shaders offline (per function constant); the replay folds the alpha function and reference into the pipeline key |
+| Short control-section shaders | 47 "shader not in map" errors | agl/gsys package control sections are only 0x848/0x854 bytes, and a load-time-rewritten pointer follows the section; hashing a fixed length gives a different key every time | When a control section self-reports a length under 0x880, hash only that (table 6,536→9,742) |
+| Compute shaders without a header | Compute shaders can't be split out | ACNH's BNSH compute code starts at +0 with no 0x30 header | The splitter allows headerless compute stages |
+| Ryujinx translator crashes | 18 CS throw InvalidCastException, 1 PS throws KeyNotFound | AstOptimizer inlines expressions back into Call arguments; removed locals still used as call output pointers | CallArgumentPrepass: materialize non-local expressions into temporary locals first; re-add pointer parameters to Locals |
+| GS won't compile | 4 GS produce MSL with `unknown` types | Metal has no geometry stage | Three-entry compute prepass fallback (see 01) |
+| texpack won't mmap | The 7.3 GiB texture pack can't be mmaped whole | Without EVA, tvOS process address space totals ~7 GB | Read-only index (header + entry table ≈ 3.9 MB) + on-demand pread for data |
+| Texture view format retype | The easiest conversion to miss | The game calls nvnTextureViewSetFormat thousands of times; BC formats retyped in views must be converted too | Build views on the underlying ASTC/EAC format; GetStorageSize keeps returning the original BC bytes |
+| BC5_SNORM can't go ASTC | Normal maps sample [-1,1]→[0,1] after ASTC; n.z is all wrong | ASTC LDR has no signed mode; fixing sampling means changing shaders | Use EAC_RG11Snorm (same block bytes, exact semantics, supported on all Apple GPUs, no shader changes) |
+| Mid-render-pass depth/stencil clears | Red line "mid-pass depth/stencil clear unimplemented"; later draws test against stale depth | The game issues depth/stencil clears in the middle of a pass | End the current pass and attach the clear to the next pass (color attachments still load); keep the red line when the clear scissor doesn't cover the depth target |
+| Premature pool residency | Unused pools still hold wired memory; 4 GB devices killed at launch | Pools enter the residency set at creation | Make resident only on first GPU address fetch, and commit the set then (~0.5 GB saved upstream) |
+| Dirty-page tracker race | Game threads spin forever in the page-fault handler | Marking read-only sets PROT before mprotect; concurrent "unprotect before write" scrambles the state | State machine NONE→BUSY→mprotect→PROT; waiters recheck after BUSY clears; report red after a 2 s cap |
+| Display link never fires | Frozen on a black frame; output stops at the 3rd present | CAMetalDisplayLink callbacks never arrive on Apple TV | The output thread self-fetches drawables (env switch to revert) |
+| Depth-EQUAL prepass invariance | Diagonal black moiré on near canopies/objects (looks like z-fighting); ACNH's old library had 10.92% pure-black pixels in the same scene | The game draws a depth-only prepass, then draws color with a *different* vertex shader at depth EQUAL; MSL marked `[[position, invariant]]` but the metal compile didn't pass `-fpreserve-invariance`, so Metal ignores invariant — the two VS positions differ in the last bit, and failed-EQUAL pixels keep the clear color | Add `-fpreserve-invariance` to metal compiles on Mac/iOS/tvOS; rebuild the whole library and bump the toolchain version. Same scene after the fix: 0.00% pure black |
 
-## 音频
+## Audio
 
-| 坑 | 症状 | 定位 | 修法 |
+| Pitfall | Symptom | Diagnosis | Fix |
 |---|---|---|---|
-| REV15 线格式 | 合 main 后首帧前 svcBreak（0xc99） | 真 REV15 的 voice 段 0x188、SNDD 0xA8，比旧版各多 0x18 | 按 update/behavior revision 选布局；splitter 从「SNDD」魔数反推 stride；过渡期带日志回退静音兼容包 |
-| 测试与生产同错假设 | REV15 包测试自洽通过但线格式是错的 | fixture 与生产共享「voice 永远 0x170」假设，fuzz 变异不出合法 0x188 包 | 测试布局表与生产常量物理隔离；字节级断言尺寸/偏移/stride；状态字段至少两次 update 测试 |
-| DeviceSink 命令号 | Apple TV 没声音，PCM 全零 | SDK 20 把 DeviceSink 命令号从 0x13 改成 0x14，宿主取到另一条命令，字段校验不过整帧丢弃 | 命令号做成游戏档案项（缺省 0x13 不影响旧游戏） |
-| 渲染线程竞态 | 岛上走几分钟必崩在音频渲染线程 | SDK 20 下宿主追渲不经锁，与渲染线程并发写同一命令缓冲 | 渲染线程持锁、计渲染次数、Update 与渲染互斥；修后 2,632 s 无崩溃 |
+| REV15 wire format | svcBreak (0xc99) before first frame after merging main | Real REV15 voice sections are 0x188 and SNDD 0xA8 — 0x18 larger than the old revision | Select layout by update/behavior revision; derive splitter stride from the "SNDD" magic; during transition, fall back to a logged silent compatibility packet |
+| Tests share production's wrong assumption | The REV15 test suite passes self-consistently but the wire format is wrong | Fixture and production share the assumption "voice is always 0x170"; fuzzing can't mutate a legal 0x188 packet | Physically separate test layout tables from production constants; byte-level assertions on size/offset/stride; state fields tested across at least two updates |
+| DeviceSink command number | No audio on Apple TV; PCM all zero | SDK 20 changed the DeviceSink command number from 0x13 to 0x14; the host reads a different command, fails field validation, drops the whole frame | Make the command number a game-profile entry (default 0x13 keeps old games working) |
+| Render thread race | Minutes of island walking, then a guaranteed crash in the audio render thread | Under SDK 20 the host's chase-render calls the public ExecuteAudioRendererRendering without the host interception layer — no lock, no render counting, concurrent writes to the same command buffer as the render thread | Render thread holds the lock, counts renders, Update is mutually exclusive; 2,632 s crash-free after the fix |
 
-## 排查套路
+## Debugging drill
 
-图形黑屏的标准排查顺序（来自 nxnative 的 docs/agents 与动森实践）：
+The standard order for a graphics black screen (from nxnative's docs/agents and ACNH practice):
 
-1. **TEXDUMP**：纹理数据在不在？不在 → 查纹理上传/替换包/视图格式。
-2. **PASSDUMP**：绘制命令发没发？没发 → 查录制/回放、CallCommands、DrawElementsBaseVertex。
-3. **对着色器声明类型查视图类型**：发了但画不出 → 查 typed view（2D vs 2D 数组）、NEAR_IS_MINUS_W、alpha 测试。
-4. **读 VS 输出**：几何对不对 → 查顶点属性号、深度约定。
-5. **条件渲染/清除**：时有时无 → 查 ReportCounter 与条件清除的写回时序。
+1. **TEXDUMP**: is the texture data there? If not → check texture upload / the replacement pack / view formats.
+2. **PASSDUMP**: were draw commands issued? If not → check recording/replay, CallCommands, DrawElementsBaseVertex.
+3. **Match view types to shader declarations**: issued but nothing draws → check typed views (2D vs 2D array), NEAR_IS_MINUS_W, alpha test.
+4. **Read VS output**: geometry wrong → check vertex attribute numbers, depth conventions.
+5. **Conditional rendering/clears**: intermittent → check the write-back timing of ReportCounter and conditional clears.
 
-每个排除项都要留证据（读回字节数、像素统计），别凭感觉排除——动森的文字 bug 就在「线性贴图」上浪费过一轮，真因是 typed view。
+Keep evidence for every ruled-out item (readback byte counts, pixel statistics) — don't rule things out by feel. ACNH's text bug wasted a round on "linear textures" when the real cause was typed views.
