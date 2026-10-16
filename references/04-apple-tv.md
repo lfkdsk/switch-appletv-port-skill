@@ -7,7 +7,7 @@ Apple TV is the tightest target in this port. Every claim carries a measured num
 | Item | Number | Notes |
 |---|---|---|
 | Per-app jetsam limit | ≈ 2.05 GiB | Without entitlements; two touch runs were both killed on the next step after 2,048 MB cumulative allocation — reproducible |
-| Entitlements | Can't raise it | IML (raising the physical limit) isn't supported on tvOS; EVA only extends virtual address space, not the physical limit |
+| Entitlements | Can't raise it | No entitlement on tvOS raises the physical limit: `com.apple.developer.kernel.increased-memory-limit` is iOS/iPadOS-only per Apple docs, and `com.apple.developer.kernel.extended-virtual-addressing` only enlarges the process address space, not the resident-memory ceiling. Unified memory means every Metal resource counts against the same budget |
 | Runtime query | `os_proc_available_memory()` | Trustworthy on tvOS 27: reports 2.041 GiB at launch, 37.8 MiB one step before the kill |
 | Virtual address (no EVA) | 6 GB per mmap, 7 GB cumulative | The 7.3 GiB texture pack can't be mmaped whole — read-only index + pread instead |
 | Switch side comparison | ACNH application memory pool ≈ 3.2 GB | A ~1 GB gap that must be compressed/streamed into 2 GB |
@@ -21,6 +21,16 @@ Measured usage (Apple TV 4K 3rd gen, A15):
 | 30-minute play session (texture pack enabled) | 1,744 MiB | Flat after reaching the island, no growth; minimum headroom 353 MiB |
 
 The two big memory wins: on-demand pool residency (~0.5 GB saved, see 03) and the BC→ASTC/EAC texture pack (same resident working set 43.96 GiB → 7.31 GiB, see 4.5).
+
+### Host 16 KiB pages vs 4 KiB guest pool protection
+
+The dirty-page tracker calls `mprotect` on individual guest pool pages to catch CPU writes to GPU-visible pools (see 03 "Dirty-page tracker race"). Guest pools are 4 KiB-aligned; the Apple host page is 16 KiB. When four 4 KiB pools happen to share one 16 KiB host page, `mprotect`ing one changes the protection of all four, and the three neighbors silently take write faults they didn't ask for — the handler spins, or marks the wrong pool dirty and re-uploads unchanged bytes.
+
+Fix: before `mprotect`-ing a pool page, walk the pools sharing its host page and wrap them (track their current PROT state, protect/unprotect the host page as a unit, and restore each neighbor's logical state when it next writes). The state machine stays NONE→BUSY→mprotect→PROT per logical pool page; the physical `mprotect` is keyed on host-page granularity. Costs a per-host-page hash and one extra pointer per pool.
+
+### Re-measure on device after enabling an AOT pipeline archive
+
+Shipping an AOT pipeline archive (see 5.2) saves cold-cache prewarm compile time but adds resident memory: on the Apple TV the measured footprint grew by **+177 MiB** after enabling it, dropping minimum headroom to **79 MiB** — close enough to the jetsam cap that another regression anywhere in Metal would start killing the app. Mac savings don't transfer: the Mac has gigabytes of headroom; the Apple TV doesn't. Always re-measure footprint on real hardware after enabling an archive, not just launch time; keep the "disable archive" env switch wired so the device can boot back to a known-good baseline during triage.
 
 ## 4.2 W^X and signed code pages
 
@@ -100,10 +110,10 @@ Helper: the app exits on its own after writing screenshots or on a timer, so the
 With one Apple TV:
 
 - **Lease serialization**: build/device tasks carry an exclusive lease; only one task builds on the Mac or uses the device at a time.
-- **Same bundle ID evicts**: when tasks share a bundle ID, `devicectl --terminate-existing` kills the other side's running app. Parallel work needs distinct bundle IDs. In the ACNH project, TV1's run was evicted by OPT1's same-bundle-ID install.
+- **Same bundle ID evicts**: when tasks share a bundle ID, `devicectl --terminate-existing` kills the other side's running app. Parallel work needs distinct bundle IDs. One task's device run was evicted by another's same-bundle-ID install during the ACNH project.
 - **Shared build directories collide**: multiple tasks in one build directory overwrite each other's output (an unsigned build evicts the signed one, caught by codesign). Use per-worktree directories.
 - **Check before installing**: the deploy script checks whether another "ours" app is running on the device before installing, and waits (default 600 s) or explicitly doesn't.
-- **Leases can't stop scripts that don't check them**: during ACNH REL1 packaging, another task used an old deploy script with `FORCE_OTHER=1` to install test builds over the same bundle ID — 4 of 6 install self-tests were evicted. Keep the mutual-check logic in the deploy script itself; don't leave `FORCE_OTHER`-style backdoors.
+- **Leases can't stop scripts that don't check them**: during a release packaging task, another task used an old deploy script with `FORCE_OTHER=1` to install test builds over the same bundle ID — 4 of 6 install self-tests were evicted. Keep the mutual-check logic in the deploy script itself; don't leave `FORCE_OTHER`-style backdoors.
 - **Identify processes by bundle ID, not executable name**: liveness probes and timeout kills use the "installed app URL → bundle ID" mapping (parameters ending in `.` match by prefix). Matching on a `…/DmTV.app/DmTV` string mistakes someone else's same-named executable for yours.
 - **Device state**: `devicectl list devices` flips between `available (paired)` and `connected`; install/copy/launch work in both, and the gate only blocks unavailable.
 

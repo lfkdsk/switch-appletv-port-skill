@@ -36,7 +36,7 @@ Forensics (measured after the fix):
 
 Conclusion: callback counts and underrun counters prove nothing. Measure PCM RMS, check the spectral shape to confirm music rather than noise, and listen. Compare before/after with the same metrics.
 
-The RAUD1 review caught two lessons more general than the bug itself:
+The audio review caught two lessons more general than the bug itself:
 
 - **No logging in real-time callbacks.** Calling `LOG` (`fprintf` plus a stdio lock) in AudioUnit's render callback can block the real-time thread on a lock — low log frequency doesn't change that. Fix: double-buffered atomic level stats — the callback only accumulates sum-of-squares/peak/sample count; a normal thread swaps buffers, waits for the old buffer's writers to drain, then computes and logs.
 - **RMS numbers must be reproducible from a repo script.** The review recomputed independently from the retained PCM and found a reported "overall RMS −17.7 dBFS" that didn't match the raw PCM (actually −27.028 dBFS) — a line was mis-stitched when assembling the full-run value from 2 s log rows. Fix: the analysis script lives in the repo (reads s16le interleaved PCM, converts with `audioop.rms`'s integer semantics, without depending on `audioop` which was removed from modern Python); reports give the full command; reviews rerun it.

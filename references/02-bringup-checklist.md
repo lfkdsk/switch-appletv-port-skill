@@ -115,5 +115,5 @@ Swap in the real NVN→Metal replay backend. This stage hits most of the graphic
 | First frame (non-uniform UI) | Mac | Frame 300 |
 | First frame (fresh install) | Apple TV | 1,709 ms (optimized; see 05) |
 | Indoor dialogue | Apple TV | p50 25.5–26.1 ms (≈30 fps cap) |
-| Island outdoors | Apple TV | p50 27.8–28.9 ms (30 fps after PERF1; 84.4 ms before) |
+| Island outdoors | Apple TV | p50 27.8–28.9 ms (30 fps after the pool-translation fix; 84.4 ms before) |
 | Continuous run | Apple TV | 1,800 s without a crash |

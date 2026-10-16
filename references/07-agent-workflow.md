@@ -16,7 +16,7 @@ Supporting rules:
 - Commit after every step, or at least every 20 minutes — if a task is killed, the next one resumes from the commits;
 - Reports lead with the conclusion, then tables/commands/numbers — no filler;
 - Dependencies come in two layers: the spec's "prerequisites" are soft (read reports); dispatch parameters are hard (whose worktree to base on, whose work to review);
-- Channels break: an execution agent's channel may be shut down mid-run (it happened on this project — an administrator killed the agent provider's channel), and tasks can disconnect. All working state lives in git commits and findings reports; after a disconnect, a new task resumes from the worktree (DAY2 is exactly this — picking up a previous task's disconnected state). This is the other reason for the 20-minute commit rule.
+- Channels break: an execution agent's channel may be shut down mid-run (it happened on this project — an administrator killed the agent provider's channel), and tasks can disconnect. All working state lives in git commits and findings reports; after a disconnect, a new task resumes from the worktree (picking up a previous task's disconnected state is a routine case). This is the other reason for the 20-minute commit rule.
 
 Tasks split by layer: base, IPC framework, services, shaders, audio, loading, integration; same-layer tasks can dispatch in parallel. Fix rounds open new tasks (never reopen old ones); after a fix, dispatch a fresh review round, closing the FAIL → fix → PASS loop.
 
@@ -40,9 +40,9 @@ Real problems caught (all "self-tests all green but the implementation is wrong"
 | 35 offline services | FAIL 7 | Tests built requests per the implementation's wrong protocol: friend service wrongly required a PID, BCAT returned the wrong type, NIFM missed a C buffer (real requests were rejected at the framework layer, never reaching handlers) |
 | REV15 audio | FAIL 3 | Test packets were "REV15 magic + REV14 structure"; the real REV15 wire format (voice 0x188, SNDD 0xA8) was unimplemented, legal packets rejected |
 | Ocean GS fallback | FAIL 1 | "Input primitive = triangles" was circular evidence: triangles was the test script's default, written into the sidecar and read back as observation |
-| smbw route Z1 | FAIL 4 | Stale translation-toolchain header; shared-path fast path breaking case-exact semantics; commits carried banned trailers; game screenshots still in repo history |
-| RAUD1 (AUD1 review) | FAIL 2 | Logging in real-time callbacks (stdio lock, violates AudioUnit real-time constraints); RMS numbers not reproducible from a repo script — the reported full-run value didn't match the retained PCM |
-| RUP1b (UP1b review) | FAIL 3 | Copied the formula but not the wiring: the pacing pure function was right, but production read the main screen instead of the window's screen and never re-set it at runtime; copied half a pair: called `becomeFirstResponder` without `canBecomeFirstResponder`; A/B report not replayable (placeholder commands, unclear cold-start criteria) |
+| Community-framework route | FAIL 4 | Stale translation-toolchain header; shared-path fast path breaking case-exact semantics; commits carried banned trailers; game screenshots still in repo history |
+| Audio review | FAIL 2 | Logging in real-time callbacks (stdio lock, violates AudioUnit real-time constraints); RMS numbers not reproducible from a repo script — the reported full-run value didn't match the retained PCM |
+| Upstream borrowing review | FAIL 3 | Copied the formula but not the wiring: the pacing pure function was right, but production read the main screen instead of the window's screen and never re-set it at runtime; copied half a pair: called `becomeFirstResponder` without `canBecomeFirstResponder`; A/B report not replayable (placeholder commands, unclear cold-start criteria) |
 
 ## 7.3 The review-of cwd trap
 
@@ -75,13 +75,20 @@ Two routes cost twice the maintenance. The payoff is mutual insurance and a refe
 
 ## 7.6 Borrowing from upstream: hand-port item by item, reviews as the backstop
 
-UP1b is the full sample of "track upstream without merging wholesale" (upstream = nxnative and d2r-mobile):
+Hand-porting upstream improvements item by item (upstream = nxnative and d2r-mobile) is the full sample of "track without merging wholesale":
 
-- **No merge — hand-port item by item.** Each item notes its source commit and license (MIT), and lands with unit tests and A/B. One round borrowed five: RomFS per-directory name index (replacing two old cache layers, and incidentally killing the "APFS case-insensitivity treats wrong case as a hit" hole at the root), translation-toolchain header fixes for two profiles, DmTV's controller hand-back to UIKit and display-beat integer-division fix, and one failure-catalog entry.
+- **No merge — hand-port item by item.** Each item notes its source commit and license (MIT), and lands with unit tests and A/B. One round borrowed five: RomFS per-directory name index (replacing two old cache layers, and incidentally killing the "APFS case-insensitivity treats wrong case as a hit" hole at the root), translation-toolchain header fixes for two profiles, a controller hand-back to UIKit and display-beat integer-division fix, and one failure-catalog entry.
 - **Deciding "doesn't need porting" on evidence is also a result.** The 18 `ec::ShowShop*` overloads upstream added for Engage are useless to ACNH — of 1,016 imports, the 5 `Show…` names are all already taken over, and swkbd imports are 0. No code ported; only the failure-catalog entry for "how to find missing Show… overloads" was borrowed.
-- **Reviews specialize in catching "half-ported".** All three RUP1b failures were this class: the pacing formula ported but its production wiring (read the window's screen, re-set at runtime) didn't; `becomeFirstResponder` ported but its paired `canBecomeFirstResponder` didn't; A/B readings existed but the replayable command and cold-start criteria weren't written. Green pure-function unit tests can't prove the wiring — porting a function means porting its call sites, runtime re-setup, and paired protocols together.
+- **Reviews specialize in catching "half-ported".** The three failures above were this class: the pacing formula ported but its production wiring (read the window's screen, re-set at runtime) didn't; `becomeFirstResponder` ported but its paired `canBecomeFirstResponder` didn't; A/B readings existed but the replayable command and cold-start criteria weren't written. Green pure-function unit tests can't prove the wiring — porting a function means porting its call sites, runtime re-setup, and paired protocols together.
 
-## 7.7 Reusable checklist
+## 7.7 Testing day-based content and long-run leaks
+
+ACNH's content is day-based: fruit respawns, villagers' dialogue, museum sequences, seasonal events — testing them in real time is a non-starter.
+
+- **Host time offset with saturation.** Expose a signed offset applied to the host clock before the guest reads it. Store it in nanoseconds in a 128-bit integer and saturate on overflow (never wrap). Reads via the time service go through the offset; the host's steady clock does not — audio and the host-side scheduler keep running on wall time, so the game's audio engine doesn't go wild. The offset is persisted alongside the save; a runtime command (`time +1d`, `time =2026-11-30`) adjusts it between sessions, not inside a session. Env var `DM_TIME_OFFSET` sets a starting value on launch.
+- **Long-run leak methodology.** Record per-minute footprint and allocation ledgers in a persistent file (one row per minute: wall time, resident, Metal heap in use, replay-layer allocations). The crude "look at a graph" test catches obvious leaks and misses slow ones. For the actual decision, run two sessions well past warm-up (one 7,500 s + one 3,900 s minimum), drop the first hour as warm-up, and fit a linear regression (OLS) on the second hour's rows: `MiB/hour slope ± 95% CI`. "No leak" is `|slope| ≤ 1 MiB/h with CI straddling 0`; "trending" is `slope > 1 MiB/h with CI entirely above 0`. Partial runs (indoor only, or outdoors only, etc.) report partial — never claim "no leak" from a sample that doesn't exercise the suspect code path. Keep the raw ledger in the report so the regression is replayable.
+
+## 7.8 Reusable checklist
 
 1. Fix the spec template at four sections; machine-readable VERDICT on the final line so the coordinator can schedule by reading the last line only.
 2. Reviews are independent tasks, cross-family, self-written harnesses, protocols derived from public docs.
@@ -91,11 +98,11 @@ UP1b is the full sample of "track upstream without merging wholesale" (upstream 
 6. Single hardware is serialized by leases; device operations are main-agent-only.
 7. Write the hygiene gate into review specs: no game files/keys/screenshots in the repo or its history, license notices preserved, blob size cap.
 8. Evidence must be reproducible: command + exit code + retrieved paths; pixel assertions are semantic; audio is measured by RMS.
-9. Clean history before publishing: spoofed author identities, banned trailers, game files that entered history — deleting from the working tree isn't enough; rewrite with filter-repo and push only the cleaned branch (see 7.8).
+9. Clean history before publishing: spoofed author identities, banned trailers, game files that entered history — deleting from the working tree isn't enough; rewrite with filter-repo and push only the cleaned branch (see 7.9).
 
-## 7.8 Pre-publish history cleanup: clean working tree ≠ clean history
+## 7.9 Pre-publish history cleanup: clean working tree ≠ clean history
 
-Lessons from the ACNH project's pre-publish review (RZ1) and history cleanup (HIST1):
+Lessons from the ACNH project's pre-publish review and history cleanup:
 
 - **Upstream AGENTS.md can make agents commit under the upstream author's identity.** The upstream repo's AGENTS.md said "commit as the upstream author"; an agent complied and 15 commits landed with the wrong author. When forking, first check the repo's AGENTS.md for such clauses and fix them before starting; fix what's already wrong with mailmap + filter-repo.
 - **`Co-authored-by` trailers**: one agent provider's channel auto-adds `Co-authored-by: <provider>`; the ACNH repo had 17 commits with trailers (project notes said 12; the real count was 17 — trust `git log --grep` over memory). A message callback strips them line by line.

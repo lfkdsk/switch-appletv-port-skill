@@ -32,7 +32,7 @@ Borrowed:
 
 Borrowed:
 
-- **Game profile architecture**: one directory per game (title ID, builds, modules, RomFS markers, NVN constant tables, shader tables); tools stop without a profile. Rewrite cut points and fixed-address behavior are all keyed by NSO build ID — never let a fixed address run against an unverified build. ACNH updates frequently; this mechanism fits exactly.
+- **Game profile architecture**: one directory per game (title ID, builds, modules, RomFS markers, NVN constant tables, shader tables); tools stop without a profile. Rewrite cut points and fixed-address behavior are all keyed by NSO build ID — never let a fixed address run against an unverified build. ACNH updates frequently; this mechanism fits exactly. Profile directories are named by **base title ID** (e.g. `games/<base title id>`) so update NSPs and DLC land under the same profile — upstream renamed the layout; downstream profiles should follow before cherry-picking anything else.
 - **Survey first**: without a profile, the script auto-produces a survey report (modules/build IDs/SDK version/engine markers/containers/rewrite sites/import comparison) — measure before building.
 - **RomFS per-directory name index**: the read-only mount builds a "guest name → physical name" index on first lookup. Caused by Engage's single 38,000-file directory, where per-entry getxattr for case mapping made the launch black-screen for 17 s; 1.8 s after indexing. ACNH RomFS has 100k+ files — same problem.
 - **Present interval as a profile entry**: `game` (present at the game's own interval, same as Switch) vs `display` (one frame per display beat). ACNH locks 30 fps and its logic is frame-driven — the `game` profile.

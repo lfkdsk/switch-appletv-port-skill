@@ -1,6 +1,6 @@
 # 03 · Pitfall catalog before first frame (symptom → diagnosis → fix)
 
-Every entry was actually hit and fixed during the ACNH port. Sources are engineering reports from both routes (nx route P2a/P2b/P2c, smbw route Z1/T2/T3/OPT1 and others). Look up by symptom; don't read in order.
+Every entry was actually hit and fixed during the ACNH port. Sources are engineering reports from both routes (clean-room base and community-framework fork). Look up by symptom; don't read in order.
 
 ## Loading / rewriting / kernel
 
@@ -34,6 +34,7 @@ Every entry was actually hit and fixed during the ACNH port. Sources are enginee
 | Six-axis / friends ABI | hid cmd 66 UNIMPL; friend:u cmd 0 rejected | Missing StartSixAxisSensor; the friends entry wrongly requires a PID | Add cmds 66/67; drop the PID requirement |
 | svcCloseHandle after HIPC Close | `svcCloseHandle 0xe401` | HIPC Close already deleted the session | One-time closed-session accounting |
 | Offline service semantics | Online features hang | 35 online services need "no network" semantics | bsd Connect returns ENETUNREACH, nifm returns NoInternetConnection, ssl returns NoConnection, etc.; unknown commands respond, never stay silent |
+| Offline HLE return type ABI | Infinite "connect to internet?" retry at the airport | `nn::nifm::HandleNetworkRequestErrorResult` was HLE'd as returning a Result; its SDK ABI is a Boolean, and the dialog loops forever on anything that isn't false | Match SDK ABI exactly: for this entry, return a Boolean. For every offline HLE entry, cross-check return type against the SDK signature, not against the HLE table's default `Result` convention |
 | Abort after "Save and end" | `nn::diag` abort (Result 0) right after the save finishes | `CalculateStandardUserSystemClockDifferenceByUser` not taken over; the SDK aborts on a null time service object | HLE the function (semantics per Ryujinx `IStaticServiceForPsc` cmd 500: compare two snapshots for the user clock offset). Round the nanosecond offset to debounce — otherwise two snapshots differ by ±1 s out of nowhere and read as a clock change; use the host's boot time as the steady clock source |
 
 ## NVN / graphics
