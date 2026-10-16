@@ -83,9 +83,9 @@ The game runs its logic at a 30 fps beat (present interval 2). On a 60 Hz displa
 
 Pacing rule:
 
-- When the game's requested present interval is 2 and the display is 60 Hz, schedule each present `presentDrawable(afterMinimumDuration:)` for two display intervals; set the layer's `preferredFrameLatency` to 2.
-- When the interval is 1 (60 Hz), set `preferredFrameLatency` to 1 and present at the next tick.
-- Hysteresis: downgrade from 60 Hz to 30 Hz only after 1 s of consistently missing the 60 Hz budget; upgrade back to 60 Hz immediately on the first in-budget window. Short dips don't flip the mode.
+- When the game's requested present interval is 2 and the display is 60 Hz, hold each presented frame for the whole two-tick period: on the in-between tick, re-present nothing and keep the deadline at "this frame's start + 2 ticks" (with a ~2 ms margin), so a fast submit can't land on the next vsync early.
+- At 30 Hz, default the layer's `preferredFrameLatency` to 2 (one extra frame of compositor lead); at 60 Hz keep it at 1. An explicit user/profile latency setting always wins.
+- Hysteresis: drop the display-link target to 30 Hz only after the game has requested interval ≥ 2 continuously for 1 s; return to 60 Hz immediately when it requests interval 1 again. An occasional slow frame never flips the mode.
 
 Measured result at 30 Hz (same scene, same 1,530-frame window): present-to-present stddev 0.603 ms → 0.301 ms (−50%); frames above 40 ms 4/1530 → 1/1530. Cost: +33.335 ms submit-ahead latency (the price of scheduling two ticks ahead). 60 Hz paths keep latency 1 — they already have no headroom to trade.
 
