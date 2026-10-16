@@ -7,7 +7,7 @@ Apple TV is the tightest target in this port. Every claim carries a measured num
 | Item | Number | Notes |
 |---|---|---|
 | Per-app jetsam limit | ≈ 2.05 GiB | Without entitlements; two touch runs were both killed on the next step after 2,048 MB cumulative allocation — reproducible |
-| Entitlements | Can't raise it | No entitlement on tvOS raises the physical limit: `com.apple.developer.kernel.increased-memory-limit` is iOS/iPadOS-only per Apple docs, and `com.apple.developer.kernel.extended-virtual-addressing` only enlarges the process address space, not the resident-memory ceiling. Unified memory means every Metal resource counts against the same budget |
+| Entitlements | Can't raise it (verified on device) | Asking for `com.apple.developer.kernel.increased-memory-limit` on tvOS does nothing: Xcode silently strips it while signing (the profile, the generated `.xcent` and the final signature all lack it). Force-signing it back makes the install fail with `0xe8008015 (A valid provisioning profile for this executable was not found.)`. With or without the request the launch budget is exactly **2098 MiB** (JetsamEvent `per-process-limit`, lifetimeMax 134,272 16 KiB pages). `extended-virtual-addressing` is also refused for tvOS profiles, and would only enlarge address space anyway. Unified memory means every Metal resource counts against the same budget |
 | Runtime query | `os_proc_available_memory()` | Trustworthy on tvOS 27: reports 2.041 GiB at launch, 37.8 MiB one step before the kill |
 | Virtual address (no EVA) | 6 GB per mmap, 7 GB cumulative | The 7.3 GiB texture pack can't be mmaped whole — read-only index + pread instead |
 | Switch side comparison | ACNH application memory pool ≈ 3.2 GB | A ~1 GB gap that must be compressed/streamed into 2 GB |
@@ -31,6 +31,8 @@ Fix: before `mprotect`-ing a pool page, walk the pools sharing its host page and
 ### Re-measure on device after enabling an AOT pipeline archive
 
 Shipping an AOT pipeline archive (see 5.2) saves cold-cache prewarm compile time but adds resident memory: on the Apple TV the measured footprint grew by **+177 MiB** after enabling it, dropping minimum headroom to **79 MiB** — close enough to the jetsam cap that another regression anywhere in Metal would start killing the app. Mac savings don't transfer: the Mac has gigabytes of headroom; the Apple TV doesn't. Always re-measure footprint on real hardware after enabling an archive, not just launch time; keep the "disable archive" env switch wired so the device can boot back to a known-good baseline during triage.
+
+The cause turned out to be the archive itself staying resident for the whole session after the pipelines had been built from it (Metal's own allocations changed by under 1 MiB). Fix: on tvOS, release the binary archive once the prewarm list has finished, keeping the pipeline objects it produced; pipelines first seen later fall back to a normal compile. Guard archive access with a lock and hand out strong references so an in-flight lookup can't race the release. Result on device: peak 2,012 → 1,825 MiB, minimum headroom 86 → 273 MiB, hit rate still 99.6%, outdoor frame time unchanged. Keep an env switch to retain the archive for comparison.
 
 ## 4.2 W^X and signed code pages
 
